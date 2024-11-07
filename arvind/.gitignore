@@ -11,5 +11,10 @@ arvind_combinations/
 
 # Ignore shell scripts
 *.sh
+# Ignore backup files
+*~
+
+# Ignore temporary files starting with .#
+.#*
 
 
