@@ -65,3 +65,9 @@ venv/
 *.pdf             # PDF files
 *.pol             # POL files (if not needed)
 *.pkl
+# Ignore all backup files (ending with ~)
+*~
+
+# Ignore all temporary files (starting with .#)
+.#*
+
