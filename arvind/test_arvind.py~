@@ -1,0 +1,785 @@
+import numpy as onp
+import pickle
+import time
+import jax.numpy as jnp
+import optax
+from jax import (
+    random,
+    vmap,
+    hessian,
+    jacfwd,
+    jit,
+    value_and_grad,
+    grad,
+    lax,
+    checkpoint,
+    clear_backends,
+)
+from tqdm import tqdm
+from jax_md import space
+import potentials
+import utils
+from jax_transformations3d import jax_transformations3d as jts
+from jaxopt import implicit_diff, GradientDescent
+from checkpoint import checkpoint_scan
+import pdb
+import functools
+import itertools
+import matplotlib.pyplot as plt
+from jax.config import config
+import gc
+import os
+
+SEED = 42
+main_key = random.PRNGKey(SEED)
+
+
+def safe_log(x, eps=1e-10):
+    return jnp.log(jnp.clip(x, a_min=eps, a_max=None))
+# Define target as a JAX array directly
+#target = jnp.array([1, 0, 2, 3, 0, 4, 5, 0, 6, 7, 0, 8, 9, 0, 10, 11, 0, 12, 13, 0, 14])
+#target = jnp.array([1, 0, 2, 3, 0, 4, 5, 0, 6, 7, 0, 8, 9, 0, 10])
+target = jnp.array([1, 0, 2, 3, 0, 4, 5, 0, 6])
+
+use_custom_pairs = True
+#custom_pairs = [(2, 3), (4, 5), (6, 7), (8, 9), (10, 11), (12, 13)]
+custom_pairs = [(2, 3), (4, 5)]
+#custom_pairs = [(2, 3), (4, 5), (6, 7), (8, 9)]
+
+def load_species_combinations(filename):
+    with open(filename, "rb") as f:
+        data = pickle.load(f)
+    return data
+
+data = load_species_combinations("arvind_3.pkl")
+
+num_monomers = max(
+    int(k.split("_")[0]) for k in data.keys() if k.endswith("_pc_species")
+)
+
+
+species_data = {}
+tot_num_structures = 0
+
+for i in range(1, num_monomers + 1):
+    key = f"{i}_pc_species"
+    species_data[key] = data[key]
+    tot_num_structures += species_data[key].shape[0]
+
+
+# Function to find the index of a target structure
+def indx_of_target(target, species_data):
+    target_reversed = target[::-1]
+    num_monomers = len(species_data)
+
+    offset = 0
+    for i in range(1, num_monomers + 1):
+        key = f"{i}_pc_species"
+        current_species = species_data[key]
+        for j in range(current_species.shape[0]):
+            if jnp.array_equal(current_species[j], target) or jnp.array_equal(
+                current_species[j], target_reversed
+            ):
+                return j + offset
+        offset += current_species.shape[0]
+
+    return None
+
+target_idx = indx_of_target(target, species_data)
+
+'''
+monomer_counts = []
+for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+    counts_list = []
+    for i in range(1, 6):  # Change the range if more counts are needed
+        key = f"{letter}_{i}_counts"
+        if key in data:
+            counts_list.append(data[key])
+    if counts_list:  # Only append if counts_list is not empty
+        monomer_counts.append(jnp.concatenate(counts_list))
+'''
+euler_scheme = "sxyz"
+
+V = 6283.
+kT = 1.0
+n = num_monomers  
+
+# Shape and energy helper functions
+a = 1.0  # distance of the center of the spheres from the BB COM
+b = 0.3  # distance of the center of the patches from the BB COM
+separation = 2.0
+noise = 1e-14
+vertex_radius = a
+patch_radius = 0.2 * a
+small_value = 1e-12
+vertex_species = 0
+n_patches = n * 2  # 2 species of patches per monomer type
+n_species = n_patches + 1  # plus the common vertex species 0
+
+n_morse_vals = (
+    n_patches * (n_patches - 1) // 2 + n_patches
+)  # all possible pair permutations plus same patch attraction (i,i)
+patchy_vals = jnp.full(
+    n - 1, 6.0
+)  # FIXME for optimization over specific attraction strengths
+initial_concentrations = jnp.full(num_monomers, 0.015)
+concs = initial_concentrations
+
+init_params = jnp.concatenate([patchy_vals, concs])
+
+
+def make_shape(size):
+    base_shape = jnp.array(
+        [
+            [-a, 0.0, b],  # first patch
+            [-a, b * jnp.cos(jnp.pi / 6.0), -b * jnp.sin(jnp.pi / 6.0)],  # second patch
+            [-a, -b * jnp.cos(jnp.pi / 6.0), -b * jnp.sin(jnp.pi / 6.0)],
+            [0.0, 0.0, a],
+            [
+                0.0,
+                a * jnp.cos(jnp.pi / 6.0),
+                -a * jnp.sin(jnp.pi / 6.0),
+            ],  # second sphere
+            [
+                0.0,
+                -a * jnp.cos(jnp.pi / 6.0),
+                -a * jnp.sin(jnp.pi / 6.0),
+            ],  # third sphere
+            [a, 0.0, b],  # first patch
+            [a, b * jnp.cos(jnp.pi / 6.0), -b * jnp.sin(jnp.pi / 6.0)],  # second patch
+            [a, -b * jnp.cos(jnp.pi / 6.0), -b * jnp.sin(jnp.pi / 6.0)],  # third patch
+        ],
+        dtype=jnp.float64,
+    )
+    return jnp.array([base_shape for _ in range(size)])
+
+
+def make_rb(size, key, separation=2.0, noise=1e-14):
+    if size == 1:
+        return jnp.array([0, 0, 0, 0, 0, 0], dtype=jnp.float64), key  # Return key
+
+    key, subkey = random.split(key)  # Split the main_key properly
+    rand_vals = random.normal(subkey, shape=(size,))
+
+    rb = []
+    half_size = size // 2
+
+    for i in range(size):
+        if size % 2 == 0:
+            if i < half_size:
+                rb.extend(
+                    [
+                        -separation / 2.0 * (size - 1 - 2 * i),
+                        rand_vals[i] * noise,
+                        0,
+                        0,
+                        0,
+                        0,
+                    ]
+                )
+            else:
+                rb.extend(
+                    [
+                        separation / 2.0 * (size - 1 - 2 * (size - 1 - i)),
+                        rand_vals[i] * noise,
+                        0,
+                        0,
+                        0,
+                        0,
+                    ]
+                )
+        else:
+            if i == half_size:
+                rb.extend([0, 0, 0, 0, 0, 0])
+            elif i < half_size:
+                rb.extend(
+                    [-separation * (half_size - i), rand_vals[i] * noise, 0, 0, 0, 0]
+                )
+            else:
+                rb.extend(
+                    [separation * (i - half_size), rand_vals[i] * noise, 0, 0, 0, 0]
+                )
+
+    return jnp.array(rb, dtype=jnp.float64), key  
+
+
+
+rep_rmax_table = jnp.full((n_species, n_species), 2 * vertex_radius)
+rep_A_table = (
+    jnp.full((n_species, n_species), small_value)
+    .at[vertex_species, vertex_species]
+    .set(500.0)
+)
+rep_alpha_table = jnp.full((n_species, n_species), 2.5)
+
+morse_narrow_alpha = 5.0
+morse_alpha_table = jnp.full((n_species, n_species), morse_narrow_alpha)
+
+
+def generate_idx_pairs(n_species):
+    idx_pairs = []
+    for i in range(1, n_species):
+        for j in range(i + 1, n_species):
+            idx_pairs.append((i, j))
+    return idx_pairs
+
+
+generated_idx_pairs = generate_idx_pairs(n_species)
+
+
+def make_tables(
+    opt_params, use_custom_pairs=True, custom_pairs=custom_pairs
+):
+    morse_eps_table = jnp.full((n_species, n_species), 3.0)
+    morse_eps_table = morse_eps_table.at[0, :].set(small_value)
+    morse_eps_table = morse_eps_table.at[:, 0].set(small_value)
+
+    if use_custom_pairs and custom_pairs is not None:
+        idx_pairs = custom_pairs
+    else:
+        idx_pairs = generated_idx_pairs
+
+    # Set off-diagonal elements
+    for i, (idx1, idx2) in enumerate(idx_pairs):
+        morse_eps_table = morse_eps_table.at[idx1, idx2].set(opt_params[i])
+        morse_eps_table = morse_eps_table.at[idx2, idx1].set(opt_params[i])
+
+    # Set diagonal elements excluding (0,0)
+    if not use_custom_pairs:
+        diagonal_start_idx = len(idx_pairs)
+        for i in range(1, n_species):
+            morse_eps_table = morse_eps_table.at[i, i].set(
+                opt_params[diagonal_start_idx + i - 1]
+            )
+
+    return morse_eps_table
+
+
+def pairwise_morse(ipos, jpos, i_species, j_species, opt_params):
+    morse_eps_table = make_tables(opt_params)
+    morse_d0 = morse_eps_table[i_species, j_species]
+    morse_alpha = morse_alpha_table[i_species, j_species]
+    morse_r0 = 0.0
+    morse_rcut = 8.0 / morse_alpha + morse_r0
+    dr = space.distance(ipos - jpos)
+    return potentials.morse_x(
+        dr,
+        rmin=morse_r0,
+        rmax=morse_rcut,
+        D0=morse_d0,
+        alpha=morse_alpha,
+        r0=morse_r0,
+        ron=morse_rcut / 2.0,
+    )
+
+
+morse_func = vmap(
+    vmap(pairwise_morse, in_axes=(None, 0, None, 0, None)),
+    in_axes=(0, None, 0, None, None),
+)
+
+
+def pairwise_repulsion(ipos, jpos, i_species, j_species):
+    rep_rmax = rep_rmax_table[i_species, j_species]
+    rep_a = rep_A_table[i_species, j_species]
+    rep_alpha = rep_alpha_table[i_species, j_species]
+    dr = space.distance(ipos - jpos)
+    return potentials.repulsive(dr, rmin=0, rmax=rep_rmax, A=rep_a, alpha=rep_alpha)
+
+
+inner_rep = vmap(pairwise_repulsion, in_axes=(None, 0, None, 0))
+rep_func = vmap(inner_rep, in_axes=(0, None, 0, None))
+
+
+def get_nmer_energy_fn(n):
+    pairs = jnp.array(onp.array(list(itertools.combinations(onp.arange(n), 2))))
+
+    def nmer_energy_fn(q, pos, species, opt_params):
+        positions = utils.get_positions(q, pos)
+        pos_slices = [(i * 9, (i + 1) * 9) for i in range(n)]
+        species_slices = [(i * 3, (i + 1) * 3) for i in range(n)]
+
+        all_pos = jnp.stack([positions[start:end] for start, end in pos_slices])
+        all_species = jnp.stack(
+            [jnp.repeat(species[start:end], 3) for start, end in species_slices]
+        )
+
+        def pairwise_energy(pair):
+            i, j = pair
+            morse_energy = morse_func(
+                all_pos[i], all_pos[j], all_species[i], all_species[j], opt_params
+            ).sum()
+            rep_energy = rep_func(
+                all_pos[i], all_pos[j], all_species[i], all_species[j]
+            ).sum()
+            return morse_energy + rep_energy
+
+        all_pairwise_energies = vmap(pairwise_energy)(pairs)
+        return all_pairwise_energies.sum()
+
+    return nmer_energy_fn
+
+
+def hess(energy_fn, q, pos, species, opt_params):
+    H = hessian(energy_fn)(q, pos, species, opt_params)
+    evals, evecs = jnp.linalg.eigh(H)
+    return evals, evecs
+
+
+def compute_zvib(energy_fn, q, pos, species, opt_params):
+    evals, evecs = hess(energy_fn, q, pos, species, opt_params)
+    zvib = jnp.prod(jnp.sqrt(2.0 * jnp.pi / (jnp.abs(evals[6:]) + 1e-12)))
+    return zvib
+
+
+def compute_zrot_mod_sigma(energy_fn, q, pos, species, opt_params, key, nrandom=100000):
+    Nbb = len(pos)
+    evals, evecs = hess(energy_fn, q, pos, species, opt_params)
+
+    def set_nu_random(key):
+        quat = jts.random_quaternion(None, key)
+        angles = jnp.array(jts.euler_from_quaternion(quat, euler_scheme))
+        nu0 = jnp.full((Nbb * 6,), 0.)
+        return nu0.at[3:6].set(angles)
+
+    def ftilde(nu):
+        nu = nu.astype(jnp.float32)  
+        q_tilde = jnp.matmul(evecs.T[6:].T, nu[6:])
+        nu_tilde = jnp.reshape(jnp.array([nu[:6] for _ in range(Nbb)]), nu.shape)
+        return utils.add_variables_all(q_tilde, nu_tilde)
+
+    key, *splits = random.split(key, nrandom + 1)
+    nus = vmap(set_nu_random)(jnp.array(splits))
+    nu_fn = lambda nu: jnp.abs(jnp.linalg.det(jacfwd(ftilde)(nu)))
+    Js = vmap(nu_fn)(nus)
+    J = jnp.mean(Js)
+    Jtilde = 8.0 * (jnp.pi ** 2) * J
+    return Jtilde, Js, key 
+
+
+
+
+
+def compute_zc(boltzmann_weight, z_rot_mod_sigma, z_vib, sigma=3, V=V):
+    z_trans = V
+    z_rot = z_rot_mod_sigma / sigma
+    return boltzmann_weight * z_trans * z_rot * z_vib
+
+sizes = range(1, n+1)
+
+
+rbs = {}
+
+for size in sizes:
+    main_key, subkey = random.split(main_key)
+    rb, subkey = make_rb(size, subkey)
+    rbs[size] = rb
+    main_key = subkey
+    
+shapes = {size: make_shape(size) for size in sizes}
+#sigmas = {size: data[f'{size}_sigma'] for size in sizes if f'{size}_sigma' in data}
+energy_fns = {size: jit(get_nmer_energy_fn(size)) for size in range(2, n+1)}
+
+rb1 = rbs[1]
+shape1 = shapes[1]
+#sigma1 = data["1_sigma"]
+mon_energy_fn = lambda q, pos, species, opt_params: 0.0
+
+
+
+zrot_mod_sigma_1,_, main_key = compute_zrot_mod_sigma(mon_energy_fn, rb1, shape1,  jnp.array([1, 0, 2]), patchy_vals, main_key)
+zvib_1 = 1.0
+boltzmann_weight = 1.0
+
+z_1 = compute_zc(boltzmann_weight, zrot_mod_sigma_1, zvib_1)  #, sigmas[1])
+z_1s = jnp.full(n, z_1)
+log_z_1 = jnp.log(z_1s)
+
+zrot_mod_sigma_values = {}
+
+for size in range(2, n + 1):
+
+    zrot_mod_sigma, Js, main_key = compute_zrot_mod_sigma(
+        energy_fns[size], 
+        rbs[size], 
+        shapes[size], 
+        jnp.array([1, 0, 2] * size), 
+        patchy_vals, 
+        main_key  
+    )
+  
+    zrot_mod_sigma_values[size] = zrot_mod_sigma
+
+    
+def get_log_z_all(opt_params):
+    def compute_log_z(size, species): #, sigma):
+        energy_fn = energy_fns[size]
+        shape = shapes[size]
+        rb = rbs[size]
+        zrot_mod_sigma = zrot_mod_sigma_values[size]
+        zvib = compute_zvib(energy_fn, rb, shape, species, opt_params)
+        e0 = energy_fn(rb, shape, species, opt_params)
+        boltzmann_weight = jnp.exp(-e0 / kT)
+        z = compute_zc(boltzmann_weight, zrot_mod_sigma, zvib)
+        return jnp.log(z)
+    
+    log_z_all = []
+       
+    for size in range(2, n + 1):
+        species = data[f'{size}_pc_species']
+        #sigma = data[f'{size}_sigma']
+        
+        if size <= 4:
+                        log_z = vmap(lambda sp: compute_log_z(size, sp))(species)
+        else:
+            compute_log_z_ckpt = checkpoint(lambda sp: compute_log_z(size, sp))
+            
+            #log_z = vmap(lambda sp, sg: compute_log_z(size, sp))(species) , sg))(species, sigma)
+        #else:
+            #compute_log_z_ckpt = checkpoint(lambda sp, sg: compute_log_z(size, sp, sg))
+            #flat_species = species.reshape(species.shape[0], -1)
+            #xs = jnp.concatenate([flat_species, sigma[:, None]], axis=-1)
+            compute_log_z_ckpt = checkpoint(lambda sp: compute_log_z(size, sp))
+            flat_species = species.reshape(species.shape[0], -1)
+            
+            def scan_fn(carry, x):
+                #flat_species, sigma = x[:-1], x[-1]
+                flat_species = x
+                species_new = flat_species.reshape(species.shape[1:])
+                #result = compute_log_z_ckpt(species_new, sigma)
+                result = compute_log_z_ckpt(species_new)
+                return carry, result
+            
+            checkpoint_freq = 10
+            scan_with_ckpt = functools.partial(checkpoint_scan, checkpoint_every=checkpoint_freq)
+            #_, log_z = scan_with_ckpt(scan_fn, None, xs)
+            _, log_z = scan_with_ckpt(scan_fn, None, flat_species)
+            log_z = jnp.array(log_z)
+        
+        log_z_all.append(log_z)
+        
+    log_z_all = jnp.concatenate(log_z_all, axis=0) 
+    print(log_z_all.shape)
+    log_z_all = jnp.concatenate([log_z_1, log_z_all], axis=0)
+
+    
+    return log_z_all
+                                          
+                                          
+
+# Example monomer counts
+monomer_counts = []
+for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+    counts_list = []
+    for i in range(1, n+1):  
+        key = f"{letter}_{i}_counts"
+        if key in data:
+            counts_list.append(data[key])
+    if counts_list:  
+        monomer_counts.append(jnp.concatenate(counts_list))
+
+
+nper_structure = jnp.array(monomer_counts)
+
+
+def loss_fn(log_concs_struc, log_z_list, opt_params):
+    conc_params_start_idx = len(patchy_vals)
+    m_conc = opt_params[conc_params_start_idx:]
+    tot_conc = jnp.sum(m_conc)
+    log_mon_conc = safe_log(m_conc)
+    
+    def mon_loss_fn(mon_idx):
+        mon_val = safe_log(jnp.dot(nper_structure[mon_idx], jnp.exp(log_concs_struc)))
+        return jnp.sqrt((mon_val - log_mon_conc[mon_idx])**2)
+
+    def struc_loss_fn(struc_idx):
+        log_vcs = jnp.log(V) + log_concs_struc[struc_idx]
+
+        def get_vcs_denom(mon_idx):
+            n_sa = nper_structure[mon_idx][struc_idx]
+            log_vca = jnp.log(V) + log_concs_struc[mon_idx]
+            return n_sa * log_vca
+
+        vcs_denom = vmap(get_vcs_denom)(jnp.arange(num_monomers)).sum()
+        log_zs = log_z_list[struc_idx]
+
+        def get_z_denom(mon_idx):
+            n_sa = nper_structure[mon_idx][struc_idx]
+            log_zalpha = log_z_list[mon_idx]
+            return n_sa * log_zalpha
+
+        z_denom = vmap(get_z_denom)(jnp.arange(num_monomers)).sum()
+
+        return jnp.sqrt((log_vcs - vcs_denom - log_zs + z_denom)**2)
+    
+    mon_loss = vmap(mon_loss_fn)(jnp.arange(num_monomers))
+    struc_loss = vmap(struc_loss_fn)(jnp.arange(num_monomers, tot_num_structures))
+    combined_loss = jnp.concatenate([mon_loss, struc_loss])
+    loss_var = jnp.var(combined_loss)
+    loss_max = jnp.max(combined_loss)
+
+    #tot_loss = jnp.linalg.norm(combined_loss) + loss_var #+ 5 * loss_max
+    tot_loss = jnp.linalg.norm(combined_loss) + loss_var
+    return tot_loss, combined_loss, loss_var
+
+def optimality_fn(log_concs_struc, log_z_list, opt_params):
+    return grad(lambda log_concs_struc, log_z_list, opt_params: loss_fn(log_concs_struc, log_z_list, opt_params)[0])(log_concs_struc, log_z_list, opt_params)
+
+"""
+inner_solver_logs = []
+
+@implicit_diff.custom_root(optimality_fn)
+def inner_solver(init_guess, log_z_list, opt_params):
+    maxiter = 20000
+    
+    # Create the optimizer with gradient clipping and Adam
+    optimizer = optax.chain(
+        optax.clip(3.0),  # Clips gradients by the provided value
+        optax.adam(learning_rate=0.01)  # Adam optimizer with adaptive learning rate
+    )
+    
+    opt_state = optimizer.init(init_guess)
+    
+    params = init_guess
+    for i in range(maxiter):
+        loss_val, combined_losses, loss_var = loss_fn(params, log_z_list, opt_params)
+        
+        # Sort and select the top 50 largest combined losses
+        top_combined_losses = jnp.sort(combined_losses)[-30:]
+        
+        inner_solver_logs.append({
+            "iteration": i,
+            "tot_loss": loss_val,
+            "combined_loss": top_combined_losses,
+            "loss_var": loss_var
+        })
+        
+        # Compute gradients
+        grads = grad(lambda log_concs_struc: loss_fn(log_concs_struc, log_z_list, opt_params)[0])(params)
+        
+        # Apply the optimizer update with gradient clipping
+        updates, opt_state = optimizer.update(grads, opt_state, params)
+        params = optax.apply_updates(params, updates)
+
+        # Optional: Print the values (remove this line if you do not want to print)
+        print(f"Iteration {i}: tot_loss={loss_val}, loss_var={loss_var}, top_combined_losses={top_combined_losses}")
+
+    return params
+
+opt_params = init_params
+conc_params_start_idx = len(patchy_vals)
+tot_conc = jnp.sum(opt_params[conc_params_start_idx:])
+struc_concs_guess = jnp.full(tot_num_structures, safe_log(tot_conc / tot_num_structures))
+log_z_list = get_log_z_all(opt_params)
+struc_concs_guess = jnp.full(tot_num_structures, safe_log(tot_conc / tot_num_structures))
+fin_log_concs = inner_solver(struc_concs_guess, log_z_list, opt_params)
+
+pdb.set_trace()
+
+
+
+@implicit_diff.custom_root(optimality_fn)
+def inner_solver(init_guess, log_z_list, opt_params):
+    maxiter = 5000
+    
+    def loss_fn_wrapped(params, log_z_list, opt_params):
+        return loss_fn(params, log_z_list, opt_params)[0]
+    
+    optimizer = optax.chain(
+        optax.clip(3.0),  # Clips gradients by the provided value
+        optax.adam(learning_rate=0.01)  # Adam optimizer with adaptive learning rate
+    )
+    
+    gd = GradientDescent(fun=loss_fn_wrapped, maxiter=maxiter, implicit_diff=True)
+    
+    # Run the gradient descent
+    sol = gd.run(init_guess, log_z_list, opt_params)
+    
+    final_params = sol.params
+    
+    # Compute the final loss, combined losses, and other metrics
+    final_loss, _, _ = loss_fn(final_params, log_z_list, opt_params)
+    
+    return final_params
+
+
+@implicit_diff.custom_root(optimality_fn)
+def inner_solver(init_guess, log_z_list, opt_params):
+    maxiter = 50000
+    step_size = 0.01  # you might want to adjust this value
+    
+    params = init_guess
+    for i in range(maxiter):
+        loss_val, combined_losses, loss_var = loss_fn(params, log_z_list, opt_params)
+        
+        # Sort and select the top 50 largest combined losses
+        top_combined_losses = jnp.sort(combined_losses)[-30:]
+        
+        # Gradient step
+        grads = grad(lambda log_concs_struc: loss_fn(log_concs_struc, log_z_list, opt_params)[0])(params)
+        params = params - step_size * grads
+
+        # Print the values (if needed, remove this line if you do not want to print)
+        print(f"Iteration {i}: tot_loss={loss_val}, loss_var={loss_var}, top_combined_losses={top_combined_losses}")
+
+    return params
+
+opt_params = init_params
+conc_params_start_idx = len(patchy_vals)
+tot_conc = jnp.sum(opt_params[conc_params_start_idx:])
+struc_concs_guess = jnp.full(tot_num_structures, safe_log(tot_conc / tot_num_structures))
+log_z_list = get_log_z_all(opt_params)
+struc_concs_guess = jnp.full(tot_num_structures, safe_log(tot_conc / tot_num_structures))
+fin_log_concs = inner_solver(struc_concs_guess, log_z_list, opt_params)
+
+pdb.set_trace()
+
+#############################
+"""
+@implicit_diff.custom_root(optimality_fn)
+def inner_solver(init_guess, log_z_list, opt_params):
+    gd = GradientDescent(fun=lambda log_concs_struc, log_z_list, opt_params: loss_fn(log_concs_struc, log_z_list, opt_params)[0], maxiter=50000, implicit_diff=True)
+    sol = gd.run(init_guess, log_z_list, opt_params)
+    
+    final_params = sol.params
+    final_loss, combined_losses, loss_var = loss_fn(final_params, log_z_list, opt_params)
+    max_loss = jnp.max(combined_losses)
+    second_max_loss = jnp.partition(combined_losses, -2)[-2]
+    
+    return final_params
+
+
+#########################
+
+def ofer(opt_params):
+    log_z_list = get_log_z_all(opt_params)
+    conc_params_start_idx = len(patchy_vals)
+    tot_conc = jnp.sum(opt_params[conc_params_start_idx:])
+    struc_concs_guess = jnp.full(tot_num_structures, safe_log(tot_conc / tot_num_structures))
+    fin_log_concs = inner_solver(struc_concs_guess, log_z_list, opt_params)
+    fin_concs = jnp.exp(fin_log_concs)
+    yields = fin_concs / jnp.sum(fin_concs)
+    target_yield = safe_log(yields[target_idx])
+    return target_yield
+
+def ofer_grad_fn(opt_params, desired_yield_val):
+    target_yield = ofer(opt_params)
+    loss = (desired_yield_val - jnp.exp(target_yield))**2
+    return loss
+
+def project(params):
+    conc_min, conc_max = 1e-6, 3.0
+    concs = jnp.clip(params[-num_monomers:], a_min=conc_min, a_max=conc_max)
+    return jnp.concatenate([params[:-num_monomers], concs])
+
+
+
+num_params = len(init_params)
+mask = jnp.zeros(num_params)
+mask = mask.at[-num_monomers:].set(1.0)
+
+def masked_grads(grads):
+    return grads * mask
+
+our_grad_fn = jit(value_and_grad(ofer_grad_fn, has_aux=False))
+#our_grad_fn = value_and_grad(ofer_grad_fn, has_aux=False)
+params = init_params
+outer_optimizer = optax.adam(1e-2)
+opt_state = outer_optimizer.init(params)
+
+n_outer_iters = 250
+outer_losses = []
+
+if use_custom_pairs and custom_pairs is not None:
+    param_names = [f"Eps({i},{j})" for i, j in custom_pairs]
+else:
+    param_names = [f"Eps({i},{j})" for i, j in generated_idx_pairs]
+    param_names += [f"Eps({i},{i})" for i in range(1, n_patches + 1)]
+
+param_names += [f"conc_{chr(ord('A') + i)}" for i in range(num_monomers)]
+
+final_results = []
+"""
+#####################
+
+
+
+conc_range = jnp.arange(0.01, 0.09, 0.005)
+
+with open("stoc_results.txt", "w") as final_results_file:
+    final_results_file.write("Yield\tConcentrations\n")
+    for conc_val in conc_range:
+        concs = jnp.full(num_monomers, conc_val)
+        params = jnp.concatenate([patchy_vals, concs])
+        fin_yield = jnp.exp(ofer(params))
+        
+        final_results_file.write(f"{fin_yield}\t{conc_val}\n")
+
+
+###################
+"""
+
+
+desired_yields_range = jnp.arange(0.1, 0.9, 0.1)
+
+if not os.path.exists("yield_results_3"):
+    os.makedirs("yield_results_3")   
+    
+print("Initial Parameters:")
+for name, value in {name: params[idx] for idx, name in enumerate(param_names)}.items():
+    print(f"{name}: {value}")
+
+with open("final_results_3_ratio.txt", "w") as final_results_file:
+    for desired_yield in desired_yields_range:
+        with open(f"yield_results/yield_{desired_yield}.txt", "w") as yield_file:
+            for i in tqdm(range(n_outer_iters)):
+                # Compute loss and gradients
+                loss, grads = our_grad_fn(params, desired_yield)
+                outer_losses.append(loss)
+                grads = masked_grads(grads)
+                
+                # Print loss and gradients
+                print(f"Iteration {i + 1}: Loss = {loss}")
+                print("Gradients:")
+                for name, value in {name: grads[idx] for idx, name in enumerate(param_names)}.items():
+                    print(f"{name}: {value}")
+                
+                # Update parameters and print updated parameters
+                updates, opt_state = outer_optimizer.update(grads, opt_state)
+                params = optax.apply_updates(params, updates)
+                params = project(params)
+                
+                print("Updated Parameters:")
+                for name, value in {name: params[idx] for idx, name in enumerate(param_names)}.items():
+                    print(f"{name}: {value}")
+                
+                # Save results to file
+                yield_file.write(f"Iteration {i + 1}:\n")
+                yield_file.write(f"Loss: {loss}\n")
+                yield_file.write(f"Parameters:\n")
+                for name, value in {name: params[idx] for idx, name in enumerate(param_names)}.items():
+                    yield_file.write(f"{name}: {value}\n")
+                fin_yield = jnp.exp(ofer(params))   
+                yield_file.write(f"Yield: {fin_yield}\n\n")
+                print(f"Yield: {fin_yield}" )
+                
+        final_params = params
+        final_target_yields = jnp.exp(ofer(final_params))
+
+        final_params_dict = {name: final_params[idx] for idx, name in enumerate(param_names)}
+
+        final_results_file.write(f"Desired Yield: {desired_yield}\n")
+        final_results_file.write("Final Optimized Parameters:\n")
+        for name, value in final_params_dict.items():
+            final_results_file.write(f"{name}: {value}\n")
+        final_results_file.write(f"Final Loss: {loss}\n")
+        final_results_file.write(f"Final Target Yields: {final_target_yields}\n\n")
+
+        # Print final results
+        print(f"Final Results for Desired Yield {desired_yield}:")
+        for name, value in final_params_dict.items():
+            print(f"{name}: {value}")
+        print(f"Final Loss: {loss}")
+        print(f"Final Target Yields: {final_target_yields}\n")
+
+print("All results saved.")

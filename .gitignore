@@ -1,0 +1,67 @@
+# OS generated files #
+######################
+.DS_Store         # macOS
+Thumbs.db         # Windows
+*.swp             # Vim swap files
+
+# Python files #
+################
+__pycache__/      # Python bytecode
+*.pyc
+*.pyo
+*.pyd
+
+# Jupyter notebooks checkpoints #
+#################################
+.ipynb_checkpoints/
+
+# Environment variables and credentials #
+########################################
+.env              # Environment variables
+.env.local
+
+# Virtual environments #
+########################
+venv/
+.venv/
+
+# Logs and databases #
+######################
+*.log             # Log files
+*.sqlite3         # SQLite databases
+
+# Compiled code #
+#################
+*.o               # Object files
+*.so              # Shared object files
+*.out             # Output executables
+
+# Backup files #
+################
+*.bak
+*.tmp
+*.old
+
+# Ignore build and distribution folders #
+#########################################
+/dist/
+/build/
+/node_modules/    # Node.js dependencies
+
+# Ignore package files #
+########################
+*.lock
+*.tar
+*.zip
+
+# Documentation builds #
+########################
+/docs/_build/
+
+# Specific file types to ignore #
+#################################
+*.txt             # Text files
+*.png             # PNG image files
+*.pdf             # PDF files
+*.pol             # POL files (if not needed)
+*.pkl
