@@ -24,74 +24,31 @@ from jaxopt import implicit_diff, GradientDescent
 from checkpoint import checkpoint_scan
 import pdb
 import functools
-import itertools
+import itertools 
+from itertools import permutations
 import matplotlib.pyplot as plt
 from jax.config import config
 import gc
 import os
+import networkx as nx
+from itertools import product 
 
 SEED = 42
 main_key = random.PRNGKey(SEED)
 
-
-def safe_log(x, eps=1e-10):
-    return jnp.log(jnp.clip(x, a_min=eps, a_max=None))
-
-target = jnp.array([1, 0, 2, 3, 0, 4, 5, 0, 6, 7,0,8])
-
-use_custom_pairs = True
-
-custom_pairs = [(2, 3), (4, 5), (6, 7)]
-
-
-def load_species_combinations(filename):
-    with open(filename, "rb") as f:
-        data = pickle.load(f)
-    return data
-
-data = load_species_combinations("arvind_4.pkl")
-
-num_monomers = max(
-    int(k.split("_")[0]) for k in data.keys() if k.endswith("_pc_species")
-)
-
-
-species_data = {}
-tot_num_structures = 0
-import numpy as onp
-import pickle
-import time
 import jax.numpy as jnp
-import optax
-from jax import (
-    random,
-    vmap,
-    hessian,
-    jacfwd,
-    jit,
-    value_and_grad,
-    grad,
-    lax,
-    checkpoint,
-    clear_backends,
-)
-from tqdm import tqdm
-from jax_md import space
-import potentials
-import utils
-from jax_transformations3d import jax_transformations3d as jts
-from jaxopt import implicit_diff, GradientDescent
-from checkpoint import checkpoint_scan
-import pdb
-import functools
-import itertools
-import matplotlib.pyplot as plt
-from jax.config import config
-import gc
-import os
+from itertools import permutations
+from jax import random
 
-SEED = 42
-main_key = random.PRNGKey(SEED)
+# Define constants
+a = 1.0  # Radius placeholder
+b = .3
+separation = 2.0
+noise = 1e-14
+
+
+
+
 
 
 def safe_log(x, eps=1e-10):
@@ -99,11 +56,13 @@ def safe_log(x, eps=1e-10):
 # Define target as a JAX array directly
 #target = jnp.array([1, 0, 2, 3, 0, 4, 5, 0, 6, 7, 0, 8, 9, 0, 10, 11, 0, 12, 13, 0, 14])
 #target = jnp.array([1, 0, 2, 3, 0, 4, 5, 0, 6, 7, 0, 8, 9, 0, 10])
-target = jnp.array([1, 0, 2, 3, 0, 4, 5, 0, 6, 7,0,8])
+#target = jnp.array([1, 0, 2, 3, 0, 4, 5, 0, 6, 7,0,8])
+target = jnp.array([1, 0, 2, 3, 0, 4, 5, 0, 6])
 
 use_custom_pairs = True
 #custom_pairs = [(2, 3), (4, 5), (6, 7), (8, 9), (10, 11), (12, 13)]
-custom_pairs = [(2, 3), (4, 5), (6, 7)]
+#custom_pairs = [(2, 3), (4, 5), (6, 7)]
+custom_pairs = [(2, 3), (4, 5)]
 #custom_pairs = [(2, 3), (4, 5), (6, 7), (8, 9)]
 
 def load_species_combinations(filename):
@@ -111,7 +70,7 @@ def load_species_combinations(filename):
         data = pickle.load(f)
     return data
 
-data = load_species_combinations("arvind_4.pkl")
+data = load_species_combinations("arvind_3.pkl")
 
 num_monomers = max(
     int(k.split("_")[0]) for k in data.keys() if k.endswith("_pc_species")
@@ -150,7 +109,7 @@ target_idx = indx_of_target(target, species_data)
 euler_scheme = "sxyz"
 
 V =  54000.0
-kT = 1.5
+kT = 1.0
 n = num_monomers  
 
 # Shape and energy helper functions
@@ -169,11 +128,11 @@ n_morse_vals = (
     n_patches * (n_patches - 1) // 2 + n_patches
 )  # all possible pair permutations plus same patch attraction (i,i)
 patchy_vals = jnp.full(
-    n-1, 9.0
+    n-1, 7.0
 )  # FIXME for optimization over specific attraction strengths
 
-init_conc = 0.001/4
-init_concs = jnp.array([init_conc, init_conc, init_conc, init_conc ])
+init_conc = 0.001/n
+init_concs = jnp.full(n, init_conc)
 init_params = jnp.concatenate([patchy_vals, init_concs])
 
 
@@ -251,8 +210,6 @@ def make_rb(size, key, separation=2.0, noise=1e-14):
 
     return jnp.array(rb, dtype=jnp.float64), key  
 
-
-
 rep_rmax_table = jnp.full((n_species, n_species), 2 * vertex_radius)
 rep_A_table = (
     jnp.full((n_species, n_species), small_value)
@@ -279,7 +236,7 @@ generated_idx_pairs = generate_idx_pairs(n_species)
 def make_tables(
     opt_params, use_custom_pairs=True, custom_pairs=custom_pairs
 ):
-    morse_eps_table = jnp.full((n_species, n_species), 2.0)
+    morse_eps_table = jnp.full((n_species, n_species), 5.0)
     morse_eps_table = morse_eps_table.at[0, :].set(small_value)
     morse_eps_table = morse_eps_table.at[:, 0].set(small_value)
 
@@ -409,7 +366,7 @@ def compute_zrot_mod_sigma(energy_fn, q, pos, species, opt_params, key, nrandom=
 
 
 
-def compute_zc(boltzmann_weight, z_rot_mod_sigma, z_vib, sigma=3, V=V):
+def compute_zc(boltzmann_weight, z_rot_mod_sigma, z_vib, sigma, V=V):
     z_trans = V
     z_rot = z_rot_mod_sigma / sigma
     return boltzmann_weight * z_trans * z_rot * z_vib
@@ -426,7 +383,7 @@ for size in sizes:
     main_key = subkey
     
 shapes = {size: make_shape(size) for size in sizes}
-#sigmas = {size: data[f'{size}_sigma'] for size in sizes if f'{size}_sigma' in data}
+sigmas = {size: data[f'{size}_sigma'] for size in sizes if f'{size}_sigma' in data}
 energy_fns = {size: jit(get_nmer_energy_fn(size)) for size in range(2, n+1)}
 
 rb1 = rbs[1]
@@ -440,7 +397,7 @@ zrot_mod_sigma_1,_, main_key = compute_zrot_mod_sigma(mon_energy_fn, rb1, shape1
 zvib_1 = 1.0
 boltzmann_weight = 1.0
 
-z_1 = compute_zc(boltzmann_weight, zrot_mod_sigma_1, zvib_1)  #, sigmas[1])
+z_1 = compute_zc(boltzmann_weight, zrot_mod_sigma_1, zvib_1, sigmas[1])
 z_1s = jnp.full(n, z_1)
 log_z_1 = jnp.log(z_1s)
 
@@ -461,7 +418,7 @@ for size in range(2, n + 1):
 
     
 def get_log_z_all(opt_params):
-    def compute_log_z(size, species): #, sigma):
+    def compute_log_z(size, species, sigma):
         energy_fn = energy_fns[size]
         shape = shapes[size]
         rb = rbs[size]
@@ -469,50 +426,44 @@ def get_log_z_all(opt_params):
         zvib = compute_zvib(energy_fn, rb, shape, species, opt_params)
         e0 = energy_fn(rb, shape, species, opt_params)
         boltzmann_weight = jnp.exp(-e0 / kT)
-        z = compute_zc(boltzmann_weight, zrot_mod_sigma, zvib)
+        z = compute_zc(boltzmann_weight, zrot_mod_sigma, zvib, sigma)
         return jnp.log(z)
     
     log_z_all = []
-       
+    
     for size in range(2, n + 1):
         species = data[f'{size}_pc_species']
-        #sigma = data[f'{size}_sigma']
+        sigma = data[f'{size}_sigma']
+        
+        # Repeat sigma for each structure in species of the current size
+        sigma_array = jnp.full(species.shape[0], sigma)
         
         if size <= 4:
-                        log_z = vmap(lambda sp: compute_log_z(size, sp))(species)
+            log_z = vmap(lambda sp, sg: compute_log_z(size, sp, sg))(species, sigma_array)
         else:
-            compute_log_z_ckpt = checkpoint(lambda sp: compute_log_z(size, sp))
-            
-            #log_z = vmap(lambda sp, sg: compute_log_z(size, sp))(species) , sg))(species, sigma)
-        #else:
-            #compute_log_z_ckpt = checkpoint(lambda sp, sg: compute_log_z(size, sp, sg))
-            #flat_species = species.reshape(species.shape[0], -1)
-            #xs = jnp.concatenate([flat_species, sigma[:, None]], axis=-1)
-            compute_log_z_ckpt = checkpoint(lambda sp: compute_log_z(size, sp))
+            compute_log_z_ckpt = checkpoint(lambda sp, sg: compute_log_z(size, sp, sg))
             flat_species = species.reshape(species.shape[0], -1)
-            
+            xs = jnp.concatenate([flat_species, sigma_array[:, None]], axis=-1)
+
             def scan_fn(carry, x):
-                #flat_species, sigma = x[:-1], x[-1]
-                flat_species = x
+                flat_species, sigma_val = x[:-1], x[-1]
                 species_new = flat_species.reshape(species.shape[1:])
-                #result = compute_log_z_ckpt(species_new, sigma)
-                result = compute_log_z_ckpt(species_new)
+                result = compute_log_z_ckpt(species_new, sigma_val)
                 return carry, result
-            
+
             checkpoint_freq = 10
             scan_with_ckpt = functools.partial(checkpoint_scan, checkpoint_every=checkpoint_freq)
-            #_, log_z = scan_with_ckpt(scan_fn, None, xs)
-            _, log_z = scan_with_ckpt(scan_fn, None, flat_species)
+            _, log_z = scan_with_ckpt(scan_fn, None, xs)
             log_z = jnp.array(log_z)
         
         log_z_all.append(log_z)
         
-    log_z_all = jnp.concatenate(log_z_all, axis=0) 
+    log_z_all = jnp.concatenate(log_z_all, axis=0)
     print(log_z_all.shape)
     log_z_all = jnp.concatenate([log_z_1, log_z_all], axis=0)
 
-    
     return log_z_all
+
                                           
                                           
 
@@ -600,7 +551,7 @@ def ofer(opt_params):
 def ofer_grad_fn(opt_params, desired_yield_val):
     target_yield = ofer(opt_params)
     #loss = (desired_yield_val - jnp.exp(target_yield))**4
-    loss = (abs(jnp.log(0.2)- target_yield))**2
+    loss = (abs(jnp.log(desired_yield_val)- target_yield))**2
     return loss
 
 def ofer_grad_max(opt_params):
@@ -634,8 +585,8 @@ def normalize_logits(logits, total_concentration):
 
 num_params = len(init_params)
 
-mask = jnp.full(num_params, 1. )
-mask = mask.at[:-n].set(0.)
+mask = jnp.full(num_params, 0.)
+mask = mask.at[:-n].set(1.)
 
 def masked_grads(grads):
     return grads * mask
@@ -648,7 +599,7 @@ print("init params are:", params)
 outer_optimizer = optax.adam(1e-2)
 opt_state = outer_optimizer.init(params)
 
-n_outer_iters = 300
+n_outer_iters = 450
 outer_losses = []
 
 if use_custom_pairs and custom_pairs is not None:
@@ -660,12 +611,14 @@ else:
 param_names += [f"A conc:" ]
 param_names += [f"B conc:" ]
 param_names += [f"C conc:" ]
-param_names += [f"D conc:" ]
+#param_names += [f"D conc:" ]
 
 final_results = []
 
     
-desired_yields_range = jnp.arange(0.1, 0.45, 0.05)
+#desired_yields_range = jnp.arange(0.1,0.3, 0.1)
+
+desired_yields_range = jnp.array([0.9, 1.0])
 
 """  
 for i in tqdm(range(n_outer_iters)):
@@ -696,10 +649,10 @@ for i in tqdm(range(n_outer_iters)):
     
     
     
-with open("final_results_4_conc.txt", "w") as final_results_file:
+with open("trimer_91txt", "w") as final_results_file:
     for desired_yield in desired_yields_range:
         for i in tqdm(range(n_outer_iters)):
-            # Compute loss and gradients
+            # Compute loss and gradients 
             loss, grads = our_grad_fn(params, desired_yield)
             grads = masked_grads(grads)
             
