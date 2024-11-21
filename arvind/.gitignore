@@ -13,6 +13,8 @@ arvind_combinations/
 *.sh
 # Ignore backup files
 *~
+*.err
+*.out
 
 # Ignore temporary files starting with .#
 .#*

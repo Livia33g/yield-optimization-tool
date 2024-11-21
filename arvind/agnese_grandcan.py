@@ -70,13 +70,13 @@ n_species = 4
 
 
 
-patchy_vals = jnp.full(3, 6.0) 
+patchy_vals = jnp.full(3, 4.5)
 init_conc = jnp.full(n, 0.0005)
 
-
-init_params = jnp.concatenate([patchy_vals, init_conc])
+init_kT = jnp.array([0.5])
+init_params = jnp.concatenate([patchy_vals, init_kT, init_conc])
 V = 54000
-kT = 1.
+
  
 #mon_shapes = [sp.make_shape(1, a, b, edge_patches="right"), sp.make_shape(1, a, b, edge_patches="right")]
 
@@ -146,6 +146,7 @@ morse_alpha_table = morse_alpha_table.at[0, 0].set(small_value)
 
 
 main_key, subkey = random.split(main_key)
+"""
 morse_eps_table = small_value * random.uniform(subkey, shape=(n_species, n_species))
 
 
@@ -178,7 +179,7 @@ def pairwise_morse(ipos, jpos, i_species, j_species, opt_params):
                    alpha=morse_alpha, r0=morse_r0, ron=morse_rcut/2.)   
 
 
-
+"""
 
 @jit
 def get_energy_fns(q, pos, species, opt_params):
@@ -241,7 +242,7 @@ def get_energy_fns(q, pos, species, opt_params):
     return tot_energy 
 
 
-
+"""
 def get_energy(q, pos, species, opt_params):
     
     positions = get_positions(q, pos)
@@ -260,7 +261,7 @@ def get_energy(q, pos, species, opt_params):
     tot_energy += jnp.sum(rep_func(pos1, pos2, species1, species2))
     
     return tot_energy
-
+"""
 def add_variables(ma, mb):
     """
     given two vectors of length (6,) corresponding to x,y,z,alpha,beta,gamma,
@@ -386,7 +387,7 @@ def hess(energy_fn, q, pos, species, opt_params):
 
 def compute_zvib(energy_fn, q, pos, species, opt_params):
     evals, evecs = hess(energy_fn, q, pos, species, opt_params)
-    zvib = jnp.prod(jnp.sqrt(2.0 * jnp.pi / (jnp.abs(evals[6:]) + 1e-12)))
+    zvib = jnp.prod(jnp.sqrt(2.0 * jnp.pi / (opt_params[3]*(jnp.abs(evals[6:]) + 1e-12))))
     return zvib
 
 
@@ -426,7 +427,7 @@ zrot_mod_sigma_1,_, main_key = compute_zrot_mod_sigma(mon_energy_fn, rb_1, mon_s
 zvib_1 = 1.0
 boltzmann_weight = 1.0
 
-z_1 = compute_zc(boltzmann_weight, zrot_mod_sigma_1, zvib_1)  #, sigmas[1])
+z_1 = compute_zc(boltzmann_weight, zrot_mod_sigma_1, zvib_1)  
 z_1s = jnp.full(n, z_1)
 log_z_1 = safe_log(z_1s)
 
@@ -435,8 +436,8 @@ log_z_1 = safe_log(z_1s)
 def get_log_z_all(opt_params, key, rb=rb_2, shape=dimer_shape, species=dimer_species): 
     dim_energy_fn = get_energy_fns
     zvib = compute_zvib(dim_energy_fn, rb, shape, species, opt_params)
-    e0 = dim_energy_fn(rb, shape, species, opt_params)  # This is where get_energy is called
-    boltzmann_weight = boltzmann_weight = jnp.exp(-jnp.clip(e0 / kT, a_min=-100, a_max=100))  
+    e0 = dim_energy_fn(rb, shape, species, opt_params) 
+    boltzmann_weight = jnp.exp(-jnp.clip(e0 / opt_params[3], a_min=-100, a_max=100))  
     zrot_mod_sigma,_, new_key  = compute_zrot_mod_sigma(dim_energy_fn, rb, shape, species, opt_params, key, 2)
     z = compute_zc(boltzmann_weight, zrot_mod_sigma, zvib)
     z_log = safe_log(z)
@@ -448,8 +449,7 @@ def get_log_z_all(opt_params, key, rb=rb_2, shape=dimer_shape, species=dimer_spe
 nper_structure = nper_structure = jnp.array([[0,1,1], [1,0,1]])
 
 def loss_fn(log_concs_struc, log_z_list, opt_params):
-    conc_params_start_idx = len(patchy_vals)
-    m_conc = opt_params[conc_params_start_idx:]
+    m_conc = opt_params[-n:]
     tot_conc = jnp.sum(m_conc)
     log_mon_conc = safe_log(m_conc)
     
@@ -482,8 +482,6 @@ def loss_fn(log_concs_struc, log_z_list, opt_params):
     combined_loss = jnp.concatenate([mon_loss, struc_loss])
     loss_var = jnp.var(combined_loss)
     loss_max = jnp.max(combined_loss)
-
-    #tot_loss = jnp.linalg.norm(combined_loss) + loss_var #+ 5 * loss_max
     tot_loss = jnp.linalg.norm(combined_loss) + loss_var
     return tot_loss, combined_loss, loss_var
 
@@ -504,8 +502,7 @@ def inner_solver(init_guess, log_z_list, opt_params):
 
 def ofer(opt_params, key):
     log_z_list, new_key = get_log_z_all(opt_params, key)
-    conc_params_start_idx = len(patchy_vals)
-    tot_conc = jnp.sum(opt_params[conc_params_start_idx:])
+    tot_conc = jnp.sum(opt_params[-n:])
     struc_concs_guess = jnp.full(3, safe_log(tot_conc / 3))
     fin_log_concs = inner_solver(struc_concs_guess, log_z_list, opt_params)
     fin_concs = jnp.exp(fin_log_concs)
@@ -516,13 +513,16 @@ def ofer(opt_params, key):
 def ofer_grad_fn(opt_params, desired_yield_val, key):
     target_yield, new_key  = ofer(opt_params, key)
     loss = (desired_yield_val - jnp.exp(target_yield))**2
-    #loss = target_yield
     return loss, new_key
 
 def project(params):
     conc_min, conc_max = 1e-6, 3.0
+    kbt_min, kbt_max = 1e-6, 3.0
+    kbt_idx = 3
     concs = jnp.clip(params[-n:], a_min=conc_min, a_max=conc_max)
-    return jnp.concatenate([params[:-n], concs])
+    kbt_val = jnp.clip(params[kbt_idx], a_min=kbt_min, a_max=kbt_max)
+    kbt = jnp.array([kbt_val])
+    return jnp.concatenate([params[:kbt_idx], kbt, concs])
 
 
 num_params = len(init_params)
@@ -533,12 +533,11 @@ def masked_grads(grads):
     return grads * mask
 
 our_grad_fn = jit(value_and_grad(ofer_grad_fn, has_aux=True))
-#our_grad_fn = value_and_grad(ofer_grad_fn, has_aux=False)
 params = init_params
 outer_optimizer = optax.adam(1e-2)
 opt_state = outer_optimizer.init(params)
 
-n_outer_iters = 250
+n_outer_iters = 400
 outer_losses = []
 
 use_custom_pairs = True
@@ -551,46 +550,18 @@ else:
     param_names = [f"Eps({i},{j})" for i, j in generated_idx_pairs]
     param_names += [f"Eps({i},{i})" for i in range(1, n_patches + 1)]
 
+param_names += ["kT"]
+
 param_names += [f"conc_{chr(ord('A') + i)}" for i in range(n)]
 
 final_results = []
 
 
-desired_yields_range = jnp.arange(0.1, 1.0, 0.1)
+desired_yields_range = jnp.array([0.9])
 
-"""
-print("Initial Parameters:")
-for name, value in {name: params[idx] for idx, name in enumerate(param_names)}.items():
-    print(f"{name}: {value}")
+os.makedirs("temperature", exist_ok=True)
 
-for i in tqdm(range(n_outer_iters)):
-    # Compute loss and gradients
-    (loss, main_key), grads  = our_grad_fn(params, .5, main_key)
-    outer_losses.append(loss)
-    grads = masked_grads(grads)
-
-    # Print loss and gradients
-    print(f"Iteration {i + 1}: Loss = {loss}")
-    print("Gradients:")
-    for name, value in {name: grads[idx] for idx, name in enumerate(param_names)}.items():
-        print(f"{name}: {value}")
-
-    # Update parameters and print updated parameters
-    updates, opt_state = outer_optimizer.update(grads, opt_state)
-    params = optax.apply_updates(params, updates)
-    params = project(params)
-
-    print("Updated Parameters:")
-    for name, value in {name: params[idx] for idx, name in enumerate(param_names)}.items():
-        print(f"{name}: {value}")
-
-    # Print the yield result
-    fin_yield, main_key = ofer(params, main_key)
-    fin_yield = jnp.exp(fin_yield)   
-    print(f"Yield: {fin_yield}")
-
-"""
-with open("eps_yield_kbt10.txt", "w") as f:
+with open("temperature/kbt05_9.txt", "w") as f:
     for des_yield in desired_yields_range:
 
         for i in tqdm(range(n_outer_iters)):
@@ -600,6 +571,7 @@ with open("eps_yield_kbt10.txt", "w") as f:
             print(f"Iteration {i + 1}: Loss = {loss}")
             updates, opt_state = outer_optimizer.update(grads, opt_state)
             params = optax.apply_updates(params, updates)
+            #params = project(params)
             print("Updated Parameters:")
             for name, value in {name: params[idx] for idx, name in enumerate(param_names)}.items():
                 print(f"{name}: {value}")
@@ -613,6 +585,7 @@ with open("eps_yield_kbt10.txt", "w") as f:
         final_target_yields = jnp.exp(fin_yield)
 
         f.write(f"{des_yield},{final_target_yields},{params[0]},{params[1]},{params[2]}\n")
+        #f.write(f"{des_yield}, {final_target_yields}, {params[3]}\n")
         f.flush() 
 
 
