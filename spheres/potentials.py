@@ -2,18 +2,18 @@ import jax
 import jax.numpy as jnp
 
 
-from jax.config import config
-config.update("jax_enable_x64", True)
+# from jax.config import config
+jax.config.update("jax_enable_x64", True)
 
 
 def smoothing(r, ron, rcut):
     # Ensure rcut and ron are properly separated
     rcut = jnp.clip(rcut, 1e-6, None)  # Prevent rcut from being too small
     ron = jnp.clip(ron, 1e-6, rcut - 1e-6)  # Ensure ron < rcut
-    
+
     # Ensure valid distance for the potential
-    return jnp.where(r < ron, 1, 
-                     jnp.where(r > rcut, 0, 
+    return jnp.where(r < ron, 1,
+                     jnp.where(r > rcut, 0,
                      jnp.clip((rcut**2 - r**2)**2 * (rcut**2 + 2*r**2 - 3*ron**2), a_min=0) / ((rcut**2 - ron**2)**3)))
 
 
@@ -30,18 +30,18 @@ def morse_x_repulsive(r, rmin, rmax, D0, alpha, r0, ron):
     return -morse(r, rmin, rmax, D0, alpha, r0)*smoothing(r, ron, rmax)
 """
 def repulsive(r, rmin, rmax, A, alpha):
-    epsilon = 1e-6 
-    base = jnp.maximum(rmax - r, epsilon)  
+    epsilon = 1e-6
+    base = jnp.maximum(rmax - r, epsilon)
 
     return jnp.where(r < rmax, (A / (alpha * rmax)) * base**alpha, 1e-10)
 """
 def smooth_step(r, rmin, rmax, steepness=10):
- 
+
     x = (r - rmin) / (rmax - rmin)
     return jnp.clip(1 / (1 + jnp.exp(-steepness * (x - 0.5))), 0, 1)
 
 def repulsive(r, rmin, rmax, A, alpha):
-  
+
     epsilon = 1e-6
     base = jnp.maximum(rmax - r, epsilon)
     smoothing_factor = smooth_step(r, rmin, rmax)

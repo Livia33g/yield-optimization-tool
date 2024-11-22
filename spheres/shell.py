@@ -23,8 +23,9 @@ from jax_md import energy, space, simulate
 from jax_md import rigid_body as orig_rigid_body
 import potentials
 import jax_transformations3d as jts
-from jax.config import config
-config.update('jax_enable_x64', True)
+# from jax.config import config
+import jax
+jax.config.update('jax_enable_x64', True)
 import itertools
 import numpy as np
 import jax.numpy as jnp
@@ -52,7 +53,7 @@ def quat_to_euler(quaternions):
     x = quaternions[:, 1]
     y = quaternions[:, 2]
     z = quaternions[:, 3]
-    
+
     sinr_cosp = 2 * (w * x + y * z)
     cosr_cosp = 1 - 2 * (x * x + y * y)
     roll = np.arctan2(sinr_cosp, cosr_cosp)
@@ -63,7 +64,7 @@ def quat_to_euler(quaternions):
     siny_cosp = 2 * (w * z + x * y)
     cosy_cosp = 1 - 2 * (y * y + z * z)
     yaw = np.arctan2(siny_cosp, cosy_cosp)
-    
+
     return np.stack([roll, pitch, yaw], axis=1)
 
 
@@ -147,9 +148,9 @@ def get_icos_shape_and_species(vertex_coords, vertex_radius, size):
     # Collect shape in an array and return
     base_shape = jnp.concatenate([jnp.array([anchor]), patch_pos]) - anchor
     base_species = jnp.array([0, 1, 1, 1, 1, 1])
-    
-    base_shape = base_shape.reshape(6, 3) 
-    
+
+    base_shape = base_shape.reshape(6, 3)
+
     return jnp.array([base_shape for _ in range(size)]), jnp.array([base_species for _ in range(size)])
 
 def are_blocks_connected_rb(vertex_coords, vertex_radius=1.0):
@@ -170,12 +171,12 @@ def are_blocks_connected_rb(vertex_coords, vertex_radius=1.0):
     distances = distance_matrix(positions, positions)
 
     # Determine edge length threshold (connectivity distance)
-    phi = (1 + np.sqrt(5)) / 2  
+    phi = (1 + np.sqrt(5)) / 2
     edge_length = np.sqrt(2 * (1 + phi)) * vertex_radius
 
     # Generate adjacency matrix
     adjacency_matrix = (distances <= edge_length).astype(int)
-    np.fill_diagonal(adjacency_matrix, 0) 
+    np.fill_diagonal(adjacency_matrix, 0)
 
     return adjacency_matrix
 
@@ -194,7 +195,7 @@ def is_configuration_connected_rb(indices, adj_matrix):
     indices = list(map(int, indices))
 
     visited = set()
-    to_visit = {indices[0]}  
+    to_visit = {indices[0]}
     while to_visit:
         current = to_visit.pop()
         visited.add(current)
@@ -218,7 +219,7 @@ def generate_connected_subsets_rb(vertex_coords, adj_matrix):
     """
     # Initialize variables
     num_vertices = len(vertex_coords)
-    all_configs = [vertex_coords.copy()]  
+    all_configs = [vertex_coords.copy()]
 
     current_config = vertex_coords
     current_adj_matrix = adj_matrix
@@ -236,14 +237,14 @@ def generate_connected_subsets_rb(vertex_coords, adj_matrix):
 
                 current_config = new_config
                 current_adj_matrix = current_adj_matrix[jnp.ix_(remaining_indices, remaining_indices)]
-                break 
-    all_configs = all_configs[::-1] 
+                break
+    all_configs = all_configs[::-1]
 
     return all_configs
 
 
-#adj_matrix_rb = are_blocks_connected_rb(rb_data, vertex_radius=1.0)  
-#configs_rb = generate_connected_subsets_rb(rb_data, adj_matrix_rb)  
+#adj_matrix_rb = are_blocks_connected_rb(rb_data, vertex_radius=1.0)
+#configs_rb = generate_connected_subsets_rb(rb_data, adj_matrix_rb)
 
 #print(configs_rb[0])
 vertex_species = 0
@@ -328,8 +329,9 @@ def get_nmer_energy_fn(n):
 
         all_pairwise_energies = vmap(pairwise_energy)(pairs)
         total_energy = all_pairwise_energies.sum()
-        
+
         # Print intermediate values for debugging
+        """
         print(f"n = {n}")
         print(f"positions = {positions}")
         print(f"all_pos = {all_pos}")
@@ -337,7 +339,8 @@ def get_nmer_energy_fn(n):
         print(f"all_species = {all_species}")
         print(f"all_pairwise_energies = {all_pairwise_energies}")
         print(f"total_energy = {total_energy}")
-        
+        """
+
         return total_energy
 
     return nmer_energy_fn
@@ -365,7 +368,7 @@ def compute_zrot_mod_sigma(energy_fn, q, pos, species, opt_params, key, nrandom=
         return nu0.at[3:6].set(angles)
 
     def ftilde(nu):
-        nu = nu.astype(jnp.float32)  
+        nu = nu.astype(jnp.float32)
         q_tilde = jnp.matmul(evecs.T[6:].T, nu[6:])
         nu_tilde = jnp.reshape(jnp.array([nu[:6] for _ in range(Nbb)]), nu.shape)
         return utils.add_variables_all(q_tilde, nu_tilde)
@@ -376,7 +379,7 @@ def compute_zrot_mod_sigma(energy_fn, q, pos, species, opt_params, key, nrandom=
     Js = vmap(nu_fn)(nus)
     J = jnp.mean(Js)
     Jtilde = 8.0 * (jnp.pi ** 2) * J
-    return Jtilde, Js, key 
+    return Jtilde, Js, key
 
 
 def compute_zc(boltzmann_weight, z_rot_mod_sigma, z_vib, sigma, V=V):
@@ -396,7 +399,7 @@ def get_sigma(size):
         s = 12
     else:
         s = 1
-    
+
     return s
 
 def compute_zc(boltzmann_weight, z_rot_mod_sigma, z_vib, sigma, V=V):
@@ -429,16 +432,16 @@ zrot_mod_sigma_values = []
 
 for size in range(2, 12 + 1):
     zrot_mod_sigma, Js, main_key = compute_zrot_mod_sigma(
-        energy_fns[size], 
-        rbs[size-1], 
-        shapes[size-1], 
-        species[size-1], 
-        init_params, 
-        main_key  
+        energy_fns[size],
+        rbs[size-1],
+        shapes[size-1],
+        species[size-1],
+        init_params,
+        main_key
     )
     zrot_mod_sigma_values.append(zrot_mod_sigma)
 
-print(zrot_mod_sigma_values)
+# print(zrot_mod_sigma_values)
 
 def safe_log(x, eps=1e-10):
     return jnp.log(jnp.clip(x, a_min=eps, a_max=None))
@@ -459,9 +462,9 @@ def get_log_z_all(opt_params):
         z = compute_zc(boltzmann_weight, zrot_mod_sigma, zvib, sigma)
         z = jnp.maximum(z, 1e-12)
         return safe_log(z)
-    
+
     log_z_all = []
-    
+
     for size in range(2, 12 + 1):
         log_z = compute_log_z(size)
         ###
@@ -481,7 +484,7 @@ def get_log_z_all(opt_params):
             log_z = jnp.array(log_z)
         ###
         log_z_all.append(log_z)
-    log_z_all = jnp.array(log_z_all)  
+    log_z_all = jnp.array(log_z_all)
     #log_z_all = jnp.concatenate(log_z_all, axis=0)
     print(log_z_all.shape)
     log_z_all = jnp.concatenate([log_z_1, log_z_all], axis=0)
@@ -492,34 +495,34 @@ def get_log_z_all(opt_params):
     def compute_log_z(size):
         energy_fn = energy_fns[size]
         shape = shapes[size-1]
-        print(f"shape: {shape}")
+        # print(f"shape: {shape}")
         rb = rbs[size-1]
-        print(f"rb: {rb}")
+        # print(f"rb: {rb}")
         specie = species[size-1]
         sigma = sigmas[size-1]
-        zrot_mod_sigma = zrot_mod_sigma_values[size-2]  
+        zrot_mod_sigma = zrot_mod_sigma_values[size-2]
         zvib = compute_zvib(energy_fn, rb, shape, specie, opt_params)
         zvib = jnp.maximum(zvib, 1e-12)
-        e0 = energy_fn(rb, shape, species, opt_params)    
-        print(f"e0: {e0}")
+        e0 = energy_fn(rb, shape, species, opt_params)
+        # print(f"e0: {e0}")
         boltzmann_weight = jnp.exp(-e0 / opt_params[4])
         z = compute_zc(boltzmann_weight, zrot_mod_sigma, zvib, sigma)
         z = jnp.maximum(z, 1e-12)
 
-        
+
         log_z = safe_log(z)
 
-        
         return log_z
-    
+
     log_z_all = []
-    
-    for size in range(2, 12 + 1):
+
+    for size in tqdm(range(2, 12 + 1)):
         log_z = compute_log_z(size)
         log_z_all.append(log_z)
-    
-    log_z_all = jnp.array(log_z_all)  
-    print(f"log_z_all shape: {log_z_all.shape}")
+        print(f"size {size}: {log_z}")
+
+    log_z_all = jnp.array(log_z_all)
+    # print(f"log_z_all shape: {log_z_all.shape}")
     log_z_all = jnp.concatenate([log_z_1, log_z_all], axis=0)
 
     return log_z_all
@@ -533,9 +536,9 @@ init_conc = jnp.array([0.001])
 
 def loss_fn(log_concs_struc, log_z_list, opt_params):
     m_conc = opt_params[-n:]
-    tot_conc = init_conc 
+    tot_conc = init_conc
     log_mon_conc = safe_log(m_conc)
-    
+
     def mon_loss_fn(mon_idx):
         mon_val = safe_log(jnp.dot(nper_structure[mon_idx], jnp.exp(log_concs_struc)))
         return jnp.sqrt((mon_val - log_mon_conc[mon_idx])**2)
@@ -559,7 +562,7 @@ def loss_fn(log_concs_struc, log_z_list, opt_params):
         z_denom = vmap(get_z_denom)(jnp.arange(num_monomers)).sum()
 
         return jnp.sqrt((log_vcs - vcs_denom - log_zs + z_denom)**2)
-    
+
     mon_loss = vmap(mon_loss_fn)(jnp.arange(num_monomers))
     struc_loss = vmap(struc_loss_fn)(jnp.arange(num_monomers, tot_num_structures))
     combined_loss = jnp.concatenate([mon_loss, struc_loss])
