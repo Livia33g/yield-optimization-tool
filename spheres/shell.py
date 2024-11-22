@@ -261,7 +261,7 @@ def make_tables(
 
     morse_narrow_alpha = opt_params[1]
     morse_alpha_table = jnp.full((n_species, n_species), morse_narrow_alpha)
-
+    #rep_A_table = (jnp.full((n_species, n_species), opt_params[2]).at[vertex_species, vertex_species].set(small_value))
     rep_A_table = (jnp.full((n_species, n_species), small_value).at[vertex_species, vertex_species].set(opt_params[2]))
     rep_alpha_table = jnp.full((n_species, n_species), opt_params[3])
 
@@ -327,7 +327,18 @@ def get_nmer_energy_fn(n):
             return morse_energy + rep_energy
 
         all_pairwise_energies = vmap(pairwise_energy)(pairs)
-        return all_pairwise_energies.sum()
+        total_energy = all_pairwise_energies.sum()
+        
+        # Print intermediate values for debugging
+        print(f"n = {n}")
+        print(f"positions = {positions}")
+        print(f"all_pos = {all_pos}")
+        print(f"species = {species}")
+        print(f"all_species = {all_species}")
+        print(f"all_pairwise_energies = {all_pairwise_energies}")
+        print(f"total_energy = {total_energy}")
+        
+        return total_energy
 
     return nmer_energy_fn
 
@@ -429,6 +440,10 @@ for size in range(2, 12 + 1):
 
 print(zrot_mod_sigma_values)
 
+def safe_log(x, eps=1e-10):
+    return jnp.log(jnp.clip(x, a_min=eps, a_max=None))
+
+'''
 def get_log_z_all(opt_params):
     def compute_log_z(size):
         energy_fn = energy_fns[size]
@@ -438,17 +453,18 @@ def get_log_z_all(opt_params):
         sigma = sigmas[size-1]
         zrot_mod_sigma = zrot_mod_sigma_values[size-2]  # Adjusted index to size-2
         zvib = compute_zvib(energy_fn, rb, shape, specie, opt_params)
-        print(zvib)
+        zvib = jnp.maximum(zvib, 1e-12)
         e0 = energy_fn(rb, shape, species, opt_params)
         boltzmann_weight = jnp.exp(-e0 /opt_params[4])
         z = compute_zc(boltzmann_weight, zrot_mod_sigma, zvib, sigma)
-        return jnp.log(z)
+        z = jnp.maximum(z, 1e-12)
+        return safe_log(z)
     
     log_z_all = []
     
     for size in range(2, 12 + 1):
         log_z = compute_log_z(size)
-        """
+        ###
         if size <= 4:
             log_z = compute_log_z(size)
         else:
@@ -463,7 +479,7 @@ def get_log_z_all(opt_params):
             scan_with_ckpt = functools.partial(checkpoint_scan, checkpoint_every=checkpoint_freq)
             _, log_z = scan_with_ckpt(scan_fn, None, xs)
             log_z = jnp.array(log_z)
-        """
+        ###
         log_z_all.append(log_z)
     log_z_all = jnp.array(log_z_all)  
     #log_z_all = jnp.concatenate(log_z_all, axis=0)
@@ -471,12 +487,89 @@ def get_log_z_all(opt_params):
     log_z_all = jnp.concatenate([log_z_1, log_z_all], axis=0)
 
     return log_z_all
+'''
+def get_log_z_all(opt_params):
+    def compute_log_z(size):
+        energy_fn = energy_fns[size]
+        shape = shapes[size-1]
+        print(f"shape: {shape}")
+        rb = rbs[size-1]
+        print(f"rb: {rb}")
+        specie = species[size-1]
+        sigma = sigmas[size-1]
+        zrot_mod_sigma = zrot_mod_sigma_values[size-2]  
+        zvib = compute_zvib(energy_fn, rb, shape, specie, opt_params)
+        zvib = jnp.maximum(zvib, 1e-12)
+        e0 = energy_fn(rb, shape, species, opt_params)    
+        print(f"e0: {e0}")
+        boltzmann_weight = jnp.exp(-e0 / opt_params[4])
+        z = compute_zc(boltzmann_weight, zrot_mod_sigma, zvib, sigma)
+        z = jnp.maximum(z, 1e-12)
+
+        
+        log_z = safe_log(z)
+
+        
+        return log_z
+    
+    log_z_all = []
+    
+    for size in range(2, 12 + 1):
+        log_z = compute_log_z(size)
+        log_z_all.append(log_z)
+    
+    log_z_all = jnp.array(log_z_all)  
+    print(f"log_z_all shape: {log_z_all.shape}")
+    log_z_all = jnp.concatenate([log_z_1, log_z_all], axis=0)
+
+    return log_z_all
 
 
 Z_test = get_log_z_all(init_params)
 print(Z_test)
-
 '''
+nper_structure = jnp.arange(1, 13)
+init_conc = jnp.array([0.001])
+
+def loss_fn(log_concs_struc, log_z_list, opt_params):
+    m_conc = opt_params[-n:]
+    tot_conc = init_conc 
+    log_mon_conc = safe_log(m_conc)
+    
+    def mon_loss_fn(mon_idx):
+        mon_val = safe_log(jnp.dot(nper_structure[mon_idx], jnp.exp(log_concs_struc)))
+        return jnp.sqrt((mon_val - log_mon_conc[mon_idx])**2)
+
+    def struc_loss_fn(struc_idx):
+        log_vcs = jnp.log(V) + log_concs_struc[struc_idx]
+
+        def get_vcs_denom(mon_idx):
+            n_sa = nper_structure[mon_idx][struc_idx]
+            log_vca = jnp.log(V) + log_concs_struc[mon_idx]
+            return n_sa * log_vca
+
+        vcs_denom = vmap(get_vcs_denom)(jnp.arange(num_monomers)).sum()
+        log_zs = log_z_list[struc_idx]
+
+        def get_z_denom(mon_idx):
+            n_sa = nper_structure[mon_idx][struc_idx]
+            log_zalpha = log_z_list[mon_idx]
+            return n_sa * log_zalpha
+
+        z_denom = vmap(get_z_denom)(jnp.arange(num_monomers)).sum()
+
+        return jnp.sqrt((log_vcs - vcs_denom - log_zs + z_denom)**2)
+    
+    mon_loss = vmap(mon_loss_fn)(jnp.arange(num_monomers))
+    struc_loss = vmap(struc_loss_fn)(jnp.arange(num_monomers, tot_num_structures))
+    combined_loss = jnp.concatenate([mon_loss, struc_loss])
+    loss_var = jnp.var(combined_loss)
+    loss_max = jnp.max(combined_loss)
+
+    tot_loss = jnp.linalg.norm(combined_loss) + loss_var
+    return tot_loss, combined_loss, loss_var
+
+
 coo_shell_full = get_icos_rb(ico_radius=1.0)
 pos2, species2 = get_icos_shape_and_species(coo_shell_full, vertex_radius, 2)
 sigma2 = get_sigma(pos2)
