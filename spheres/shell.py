@@ -414,6 +414,53 @@ adj_ma = are_blocks_connected_rb(coo_shell_full)
 rbs = generate_connected_subsets_rb(coo_shell_full, adj_ma)
 rbs = [rb.flatten() for rb in rbs]
 shapes_species = [get_icos_shape_and_species(coo_shell_full, vertex_radius, size) for size in range(1, 13)]
+
+
+## START RK EDITS
+
+
+pos72 = utils.get_positions(rbs[-1], shapes_species[-1][0])
+vertex_radius = 1.0
+
+
+# note: body is only a single state, not a trajectory
+box_size = 30.0
+patch_radius=0.5
+vertex_color="43a5be"
+patch_color="4fb06d"
+body_pos = pos72.reshape(-1, 3)
+assert(len(body_pos.shape) == 2)
+assert(body_pos.shape[0] % 6 == 0)
+n_vertices = body_pos.shape[0] // 6
+if n_vertices != 12:
+    print(f"WARNING: writing shell body with only {n_vertices} vertices")
+assert(body_pos.shape[1] == 3)
+
+box_def = f"boxMatrix {box_size} 0 0 0 {box_size} 0 0 0 {box_size}"
+vertex_def = f"def V \"sphere {vertex_radius*2} {vertex_color}\""
+patch_def = f"def P \"sphere {patch_radius*2} {patch_color}\""
+
+position_lines = list()
+for num_vertex in range(n_vertices):
+    vertex_start_idx = num_vertex*6
+
+    # vertex center
+    vertex_center_pos = body_pos[vertex_start_idx]
+    vertex_line = f"V {vertex_center_pos[0]} {vertex_center_pos[1]} {vertex_center_pos[2]}"
+    position_lines.append(vertex_line)
+
+    for num_patch in range(5):
+        patch_pos = body_pos[vertex_start_idx+num_patch+1]
+        patch_line = f"P {patch_pos[0]} {patch_pos[1]} {patch_pos[2]}"
+        position_lines.append(patch_line)
+
+all_lines = [box_def, vertex_def, patch_def] + position_lines + ["eof"]
+with open('my_test.pos', 'w+') as of:
+    of.write('\n'.join(all_lines))
+pdb.set_trace()
+
+
+## END RK EDITS
 shapes, species = zip(*shapes_species)
 
 energy_fns = {size: jit(get_nmer_energy_fn(size)) for size in range(2, 12+1)}

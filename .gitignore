@@ -1,3 +1,6 @@
+*.pos
+
+
 # OS generated files #
 ######################
 .DS_Store         # macOS
@@ -70,4 +73,3 @@ venv/
 
 # Ignore all temporary files (starting with .#)
 .#*
-
