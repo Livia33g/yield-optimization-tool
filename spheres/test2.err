@@ -1,0 +1,2 @@
+/net/b-nfs04-p/data/brenner_lab/share/Lab/rotation_livia/yield-optimization-tool/spheres/shell.py:26: DeprecationWarning: Accessing jax.config via the jax.config submodule is deprecated.
+  from jax.config import config
