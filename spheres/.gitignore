@@ -72,4 +72,4 @@ venv/
 # Ignore all temporary files (starting with .#)
 .#*
 
-compute_grandcan.pyßß
+compute_grandcan.py
