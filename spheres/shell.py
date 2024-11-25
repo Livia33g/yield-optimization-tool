@@ -33,7 +33,7 @@ import unittest
 from scipy.spatial import distance_matrix
 
 euler_scheme = "sxyz"
-V = 1.0
+V = 54000.0
 
 SEED = 42
 main_key = random.PRNGKey(SEED)
@@ -73,8 +73,9 @@ def quat_to_euler(quaternions):
 
 file_path_quaternion = "rb_orientation_vec.npy"
 file_path_xyz_coordinate = "rb_center.npy"
+file_path_shape = "vertex_shape_points.npy"
 
-file_paths = [file_path_quaternion, file_path_xyz_coordinate]
+file_paths = [file_path_quaternion, file_path_xyz_coordinate, file_path_shape]
 
 
 def load_rb_orientation_vec(file_paths):
@@ -89,6 +90,7 @@ def load_rb_orientation_vec(file_paths):
     """
     rb_orientation_vec = jnp.load(file_path_quaternion).astype(jnp.float64)
     rb_center_vec = jnp.load(file_path_xyz_coordinate).astype(jnp.float64)
+    rb_shape_vec = jnp.load(file_path_shape).astype(jnp.float64)
 
     orientation_sets = rb_orientation_vec.reshape(-1, 4)
     center_sets = rb_center_vec.reshape(-1, 3)
@@ -97,61 +99,19 @@ def load_rb_orientation_vec(file_paths):
     euler_orientations = quat_to_euler(np.array(orientation_sets))
 
     combined = np.hstack([np.array(center_sets), euler_orientations])
+    # combined = np.hstack([np.array(center_sets), orientation_sets])
     full_shell = jnp.array(combined)
+    shapes = rb_shape_vec
 
-    return full_shell
+    return full_shell, shapes
 
 
-def get_icos_shape_and_species(size, vertex_radius=2.0):
-    # Get the vertex shape (i.e. the coordinates of a vertex for defining a rigid body)
-    phi = 0.5 * (1 + jnp.sqrt(5))
-    vertex_coords = vertex_radius * jnp.array(
-        [
-            [phi, 1.0, 0.0],
-            [phi, -1.0, 0.0],
-            [-1 * phi, 1.0, 0.0],
-            [-1 * phi, -1.0, 0.0],
-            [1.0, 0.0, phi],
-            [-1.0, 0.0, phi],
-            [1.0, 0.0, -1 * phi],
-            [-1.0, 0.0, -1 * phi],
-            [0.0, phi, 1.0],
-            [0.0, -1 * phi, 1.0],
-            [0.0, phi, -1.0],
-            [0.0, -1 * phi, -1.0],
-        ]
-    )
+def get_icos_shape_and_species(size):
 
-    anchor = vertex_coords[0]
-    d = vmap(displacement_fn, (0, None))
-
-    # Compute all pairwise distances
-    dists = space.distance(d(vertex_coords, anchor))
-
-    # Mask the diagonal
-    self_distance_tolerance = 1e-5
-    large_mask_distance = 100.0
-    dists = jnp.where(
-        dists < self_distance_tolerance, large_mask_distance, dists
-    )  # mask the diagonal
-
-    # Find nearest neighbors
-    # note: we use min because the distances to the nearest neighbors are all the same (they should be 1 diameter away)
-    # note: this step is not differentiable, but that's fine: we keep the icosahedron fixed for the optimization
-    nbr_ids = jnp.where(dists == jnp.min(dists))[0]
-    nbr_coords = vertex_coords[nbr_ids]
-
-    # Compute displacements to neighbors to determine patch positions
-    vec = d(nbr_coords, anchor)
-    norm = jnp.linalg.norm(vec, axis=1).reshape(-1, 1)
-    vec /= norm
-    patch_pos = anchor - vertex_radius * vec
-
-    # Collect shape in an array and return
-    base_shape = jnp.concatenate([jnp.array([anchor]), patch_pos]) - anchor
+    base_shape = load_rb_orientation_vec(file_paths)[1]
     base_species = jnp.array([0, 1, 1, 1, 1, 1])
 
-    base_shape = base_shape.reshape(6, 3)
+    # base_shape = base_shape.reshape(6, 3)
 
     return jnp.array([base_shape for _ in range(size)]), jnp.array(
         [base_species for _ in range(size)]
@@ -417,15 +377,57 @@ def compute_zc(boltzmann_weight, z_rot_mod_sigma, z_vib, sigma, V=V):
 
 
 sigmas = [get_sigma(size) for size in range(1, 13)]
-full_shell_coord = load_rb_orientation_vec(file_paths)
-print(full_shell_coord)
+full_shell_coord = load_rb_orientation_vec(file_paths)[0]
+# print(full_shell_coord)
 # print(full_shell_coord.shape)
 adj_ma = are_blocks_connected_rb(full_shell_coord)
 rbs = generate_connected_subsets_rb(full_shell_coord, adj_ma)
 rbs = [rb.flatten() for rb in rbs]
 shapes_species = [get_icos_shape_and_species(size) for size in range(1, 13)]
 shapes, species = zip(*shapes_species)
+"""
+pos72 = utils.get_positions(rbs[-1], shapes_species[-1][0])
+vertex_radius = 2.0
 
+
+box_size = 30.0
+patch_radius = 0.5
+vertex_color = "43a5be"
+patch_color = "4fb06d"
+body_pos = pos72.reshape(-1, 3)
+assert len(body_pos.shape) == 2
+assert body_pos.shape[0] % 6 == 0
+n_vertices = body_pos.shape[0] // 6
+if n_vertices != 12:
+    print(f"WARNING: writing shell body with only {n_vertices} vertices")
+assert body_pos.shape[1] == 3
+
+box_def = f"boxMatrix {box_size} 0 0 0 {box_size} 0 0 0 {box_size}"
+vertex_def = f'def V "sphere {vertex_radius*2} {vertex_color}"'
+patch_def = f'def P "sphere {patch_radius*2} {patch_color}"'
+
+position_lines = list()
+for num_vertex in range(n_vertices):
+    vertex_start_idx = num_vertex * 6
+
+    # vertex center
+    vertex_center_pos = body_pos[vertex_start_idx]
+    vertex_line = (
+        f"V {vertex_center_pos[0]} {vertex_center_pos[1]} {vertex_center_pos[2]}"
+    )
+    position_lines.append(vertex_line)
+
+    for num_patch in range(5):
+        patch_pos = body_pos[vertex_start_idx + num_patch + 1]
+        patch_line = f"P {patch_pos[0]} {patch_pos[1]} {patch_pos[2]}"
+        position_lines.append(patch_line)
+
+all_lines = [box_def, vertex_def, patch_def] + position_lines + ["eof"]
+with open("my_test.pos", "w+") as of:
+    of.write("\n".join(all_lines))
+
+pdb.set_trace()
+"""
 energy_fns = {size: jit(get_nmer_energy_fn(size)) for size in range(2, 12 + 1)}
 
 mon_energy_fn = lambda q, pos, species, opt_params: 0.0
@@ -471,10 +473,18 @@ def get_log_z_all(opt_params):
         e0 = energy_fn(rb, shape, species, opt_params)
         print(f"e0: {e0}")
         boltzmann_weight = jnp.exp(-e0 / opt_params[4])
-        z = compute_zc(boltzmann_weight, zrot_mod_sigma, zvib, sigma)
+        log_z = (
+            (-e0 / opt_params[4])
+            + jnp.log(zvib)
+            + jnp.log(zrot_mod_sigma)
+            + jnp.log(V)
+            - jnp.log(sigma)
+        )
+
+        # z = compute_zc(boltzmann_weight, zrot_mod_sigma, zvib, sigma)
         # z = jnp.maximum(z, 1e-12)
 
-        log_z = jnp.log(z)
+        # log_z = jnp.log(z)
 
         return log_z
 
@@ -493,43 +503,6 @@ def get_log_z_all(opt_params):
 
 Z_test = get_log_z_all(init_params)
 print(Z_test)
-
-box_size = 30.0
-patch_radius = 0.5
-vertex_color = "43a5be"
-patch_color = "4fb06d"
-body_pos = pos72.reshape(-1, 3)
-assert len(body_pos.shape) == 2
-assert body_pos.shape[0] % 6 == 0
-n_vertices = body_pos.shape[0] // 6
-if n_vertices != 12:
-    print(f"WARNING: writing shell body with only {n_vertices} vertices")
-assert body_pos.shape[1] == 3
-
-box_def = f"boxMatrix {box_size} 0 0 0 {box_size} 0 0 0 {box_size}"
-vertex_def = f'def V "sphere {vertex_radius*2} {vertex_color}"'
-patch_def = f'def P "sphere {patch_radius*2} {patch_color}"'
-
-position_lines = list()
-for num_vertex in range(n_vertices):
-    vertex_start_idx = num_vertex * 6
-
-    # vertex center
-    vertex_center_pos = body_pos[vertex_start_idx]
-    vertex_line = (
-        f"V {vertex_center_pos[0]} {vertex_center_pos[1]} {vertex_center_pos[2]}"
-    )
-    position_lines.append(vertex_line)
-
-    for num_patch in range(5):
-        patch_pos = body_pos[vertex_start_idx + num_patch + 1]
-        patch_line = f"P {patch_pos[0]} {patch_pos[1]} {patch_pos[2]}"
-        position_lines.append(patch_line)
-
-all_lines = [box_def, vertex_def, patch_def] + position_lines + ["eof"]
-with open("my_test.pos", "w+") as of:
-    of.write("\n".join(all_lines))
-pdb.set_trace()
 
 
 """
