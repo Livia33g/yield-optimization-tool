@@ -14,7 +14,7 @@ from jax import (
     grad,
     lax,
     checkpoint,
-    clear_backends
+    clear_backends,
 )
 from checkpoint import checkpoint_scan
 import functools
@@ -24,20 +24,24 @@ from jax_md import rigid_body as orig_rigid_body
 import potentials
 import jax_transformations3d as jts
 from jax.config import config
-config.update('jax_enable_x64', True)
+
+config.update("jax_enable_x64", True)
 import itertools
 import numpy as np
 import jax.numpy as jnp
 import unittest
 from scipy.spatial import distance_matrix
+
 euler_scheme = "sxyz"
 V = 1.0
 
 SEED = 42
 main_key = random.PRNGKey(SEED)
 
-init_params = jnp.array([7., 2.5, 5.0, 500, 1.0])
+init_params = jnp.array([7.0, 2.5, 5.0, 500, 1.0])
 displacement_fn, shift_fn = space.free()
+
+
 def quat_to_euler(quaternions):
     """
     Converts a batch of normalized quaternions to Euler angles (3-2-1 sequence: roll, pitch, yaw).
@@ -52,7 +56,7 @@ def quat_to_euler(quaternions):
     x = quaternions[:, 1]
     y = quaternions[:, 2]
     z = quaternions[:, 3]
-    
+
     sinr_cosp = 2 * (w * x + y * z)
     cosr_cosp = 1 - 2 * (x * x + y * y)
     roll = np.arctan2(sinr_cosp, cosr_cosp)
@@ -63,63 +67,60 @@ def quat_to_euler(quaternions):
     siny_cosp = 2 * (w * z + x * y)
     cosy_cosp = 1 - 2 * (y * y + z * z)
     yaw = np.arctan2(siny_cosp, cosy_cosp)
-    
+
     return np.stack([roll, pitch, yaw], axis=1)
 
 
-def get_icos_rb(ico_radius=1.0):
+file_path_quaternion = "rb_orientation_vec.npy"
+file_path_xyz_coordinate = "rb_center.npy"
+
+file_paths = [file_path_quaternion, file_path_xyz_coordinate]
+
+
+def load_rb_orientation_vec(file_paths):
     """
-    Generate the 12 vertices of an icosahedron along with their orientations in Euler angles.
+    Load the rigid body orientation vector from an .npy file.
 
     Args:
-        ico_radius (float): Radius of the icosahedron.
+        file_path (str): Path to the .npy file.
 
     Returns:
-        np.ndarray: An array of shape (12, 6) with [x, y, z, roll, pitch, yaw] for each building block.
+        jnp.ndarray: Loaded array as a JAX array.
     """
-    phi = 0.5 * (1 + jnp.sqrt(5))
-    vertex_coords = ico_radius * jnp.array([
-        [phi, 1.0, 0.0],
-        [phi, -1.0, 0.0],
-        [-1 * phi, 1.0, 0.0],
-        [-1 * phi, -1.0, 0.0],
-        [1.0, 0.0, phi],
-        [-1.0, 0.0, phi],
-        [1.0, 0.0, -phi],
-        [-1.0, 0.0, -phi],
-        [0.0, phi, 1.0],
-        [0.0, -phi, 1.0],
-        [0.0, phi, -1.0],
-        [0.0, -phi, -1.0]
-    ])
+    rb_orientation_vec = jnp.load(file_path_quaternion).astype(jnp.float64)
+    rb_center_vec = jnp.load(file_path_xyz_coordinate).astype(jnp.float64)
 
-    central_point = jnp.mean(vertex_coords, axis=0)  # Center of the icosahedron
-    d = vmap(lambda pos, center: pos - center, (0, None))
-    reoriented_vectors = d(vertex_coords, central_point)
-    norm = jnp.linalg.norm(reoriented_vectors, axis=1).reshape(-1, 1)
-    reoriented_vectors /= norm
+    orientation_sets = rb_orientation_vec.reshape(-1, 4)
+    center_sets = rb_center_vec.reshape(-1, 3)
 
-    orig_vec = reoriented_vectors[0]
-    crossed = vmap(jnp.cross, (None, 0))(orig_vec, reoriented_vectors)
-    dotted = vmap(jnp.dot, (0, None))(reoriented_vectors, orig_vec)
+    # euler_from_quaternion_fn = vmap(lambda quat: jts.euler_from_quaternion(quat, euler_scheme))
+    euler_orientations = quat_to_euler(np.array(orientation_sets))
 
-    theta = jnp.arccos(dotted)
-    cos_part = jnp.cos(theta / 2).reshape(-1, 1)
-    sin_part = crossed * jnp.sin(theta / 2).reshape(-1, 1)
-    orientation = jnp.concatenate([cos_part, sin_part], axis=1)
-    orientation /= jnp.linalg.norm(orientation, axis=1).reshape(-1, 1)
+    combined = np.hstack([np.array(center_sets), euler_orientations])
+    full_shell = jnp.array(combined)
 
-    # Convert quaternions to Euler angles
-    euler_angles = quat_to_euler(np.array(orientation))
+    return full_shell
 
-    # Combine vertex coordinates and Euler angles
-    combined = np.hstack([np.array(vertex_coords), euler_angles])
-    combined = jnp.array(combined)
 
-    return combined
-
-def get_icos_shape_and_species(vertex_coords, vertex_radius, size):
+def get_icos_shape_and_species(size, vertex_radius=2.0):
     # Get the vertex shape (i.e. the coordinates of a vertex for defining a rigid body)
+    phi = 0.5 * (1 + jnp.sqrt(5))
+    vertex_coords = vertex_radius * jnp.array(
+        [
+            [phi, 1.0, 0.0],
+            [phi, -1.0, 0.0],
+            [-1 * phi, 1.0, 0.0],
+            [-1 * phi, -1.0, 0.0],
+            [1.0, 0.0, phi],
+            [-1.0, 0.0, phi],
+            [1.0, 0.0, -1 * phi],
+            [-1.0, 0.0, -1 * phi],
+            [0.0, phi, 1.0],
+            [0.0, -1 * phi, 1.0],
+            [0.0, phi, -1.0],
+            [0.0, -1 * phi, -1.0],
+        ]
+    )
 
     anchor = vertex_coords[0]
     d = vmap(displacement_fn, (0, None))
@@ -130,7 +131,9 @@ def get_icos_shape_and_species(vertex_coords, vertex_radius, size):
     # Mask the diagonal
     self_distance_tolerance = 1e-5
     large_mask_distance = 100.0
-    dists = jnp.where(dists < self_distance_tolerance, large_mask_distance, dists) # mask the diagonal
+    dists = jnp.where(
+        dists < self_distance_tolerance, large_mask_distance, dists
+    )  # mask the diagonal
 
     # Find nearest neighbors
     # note: we use min because the distances to the nearest neighbors are all the same (they should be 1 diameter away)
@@ -147,12 +150,15 @@ def get_icos_shape_and_species(vertex_coords, vertex_radius, size):
     # Collect shape in an array and return
     base_shape = jnp.concatenate([jnp.array([anchor]), patch_pos]) - anchor
     base_species = jnp.array([0, 1, 1, 1, 1, 1])
-    
-    base_shape = base_shape.reshape(6, 3) 
-    
-    return jnp.array([base_shape for _ in range(size)]), jnp.array([base_species for _ in range(size)])
 
-def are_blocks_connected_rb(vertex_coords, vertex_radius=1.0):
+    base_shape = base_shape.reshape(6, 3)
+
+    return jnp.array([base_shape for _ in range(size)]), jnp.array(
+        [base_species for _ in range(size)]
+    )
+
+
+def are_blocks_connected_rb(vertex_coords, vertex_radius=2.0):
     """
     Check connectivity between all vertices of an icosahedron based on positional data.
 
@@ -170,12 +176,12 @@ def are_blocks_connected_rb(vertex_coords, vertex_radius=1.0):
     distances = distance_matrix(positions, positions)
 
     # Determine edge length threshold (connectivity distance)
-    phi = (1 + np.sqrt(5)) / 2  
+    phi = (1 + np.sqrt(5)) / 2
     edge_length = np.sqrt(2 * (1 + phi)) * vertex_radius
 
     # Generate adjacency matrix
     adjacency_matrix = (distances <= edge_length).astype(int)
-    np.fill_diagonal(adjacency_matrix, 0) 
+    np.fill_diagonal(adjacency_matrix, 0)
 
     return adjacency_matrix
 
@@ -194,7 +200,7 @@ def is_configuration_connected_rb(indices, adj_matrix):
     indices = list(map(int, indices))
 
     visited = set()
-    to_visit = {indices[0]}  
+    to_visit = {indices[0]}
     while to_visit:
         current = to_visit.pop()
         visited.add(current)
@@ -202,7 +208,6 @@ def is_configuration_connected_rb(indices, adj_matrix):
         to_visit.update(neighbors & set(indices) - visited)
 
     return visited == set(indices)
-
 
 
 def generate_connected_subsets_rb(vertex_coords, adj_matrix):
@@ -218,7 +223,7 @@ def generate_connected_subsets_rb(vertex_coords, adj_matrix):
     """
     # Initialize variables
     num_vertices = len(vertex_coords)
-    all_configs = [vertex_coords.copy()]  
+    all_configs = [vertex_coords.copy()]
 
     current_config = vertex_coords
     current_adj_matrix = adj_matrix
@@ -235,34 +240,40 @@ def generate_connected_subsets_rb(vertex_coords, adj_matrix):
                 all_configs.append(new_config)
 
                 current_config = new_config
-                current_adj_matrix = current_adj_matrix[jnp.ix_(remaining_indices, remaining_indices)]
-                break 
-    all_configs = all_configs[::-1] 
+                current_adj_matrix = current_adj_matrix[
+                    jnp.ix_(remaining_indices, remaining_indices)
+                ]
+                break
+    all_configs = all_configs[::-1]
 
     return all_configs
 
 
-#adj_matrix_rb = are_blocks_connected_rb(rb_data, vertex_radius=1.0)  
-#configs_rb = generate_connected_subsets_rb(rb_data, adj_matrix_rb)  
+# adj_matrix_rb = are_blocks_connected_rb(rb_data, vertex_radius=1.0)
+# configs_rb = generate_connected_subsets_rb(rb_data, adj_matrix_rb)
 
-#print(configs_rb[0])
+# print(configs_rb[0])
 vertex_species = 0
 n_species = 2
-vertex_radius = 1.0
+vertex_radius = 2.0
 small_value = 1e-14
 
 rep_rmax_table = jnp.full((n_species, n_species), 2 * vertex_radius)
 
-def make_tables(
-    opt_params):
+
+def make_tables(opt_params):
     morse_eps_table = jnp.full((n_species, n_species), opt_params[0])
     morse_eps_table = morse_eps_table.at[0, :].set(small_value)
     morse_eps_table = morse_eps_table.at[:, 0].set(small_value)
 
     morse_narrow_alpha = opt_params[1]
     morse_alpha_table = jnp.full((n_species, n_species), morse_narrow_alpha)
-    #rep_A_table = (jnp.full((n_species, n_species), opt_params[2]).at[vertex_species, vertex_species].set(small_value))
-    rep_A_table = (jnp.full((n_species, n_species), small_value).at[vertex_species, vertex_species].set(opt_params[2]))
+    # rep_A_table = (jnp.full((n_species, n_species), opt_params[2]).at[vertex_species, vertex_species].set(small_value))
+    rep_A_table = (
+        jnp.full((n_species, n_species), small_value)
+        .at[vertex_species, vertex_species]
+        .set(opt_params[2])
+    )
     rep_alpha_table = jnp.full((n_species, n_species), opt_params[3])
 
     return morse_eps_table, morse_alpha_table, rep_A_table, rep_alpha_table
@@ -291,6 +302,7 @@ morse_func = vmap(
     in_axes=(0, None, 0, None, None),
 )
 
+
 def pairwise_repulsion(ipos, jpos, i_species, j_species, opt_params):
     rep_rmax = rep_rmax_table[i_species, j_species]
     rep_a = make_tables(opt_params)[2][i_species, j_species]
@@ -302,6 +314,7 @@ def pairwise_repulsion(ipos, jpos, i_species, j_species, opt_params):
 inner_rep = vmap(pairwise_repulsion, in_axes=(None, 0, None, 0, None))
 rep_func = vmap(inner_rep, in_axes=(0, None, 0, None, None))
 
+
 def get_nmer_energy_fn(n):
     pairs = jnp.array(list(itertools.combinations(np.arange(n), 2)))
 
@@ -311,10 +324,10 @@ def get_nmer_energy_fn(n):
         species_slices = [(i * 6, (i + 1) * 6) for i in range(n)]
 
         all_pos = jnp.stack([positions[start:end] for start, end in pos_slices])
-        species = jnp.concatenate([jnp.array(s).reshape(-1) for s in species])  # Ensure species elements are properly reshaped
-        all_species = jnp.stack(
-            [species[start:end] for start, end in species_slices]
-        )
+        species = jnp.concatenate(
+            [jnp.array(s).reshape(-1) for s in species]
+        )  # Ensure species elements are properly reshaped
+        all_species = jnp.stack([species[start:end] for start, end in species_slices])
 
         def pairwise_energy(pair):
             i, j = pair
@@ -322,25 +335,19 @@ def get_nmer_energy_fn(n):
                 all_pos[i], all_pos[j], all_species[i], all_species[j], opt_params
             ).sum()
             rep_energy = rep_func(
-                all_pos[i], all_pos[j], all_species[i], all_species[j],
-            opt_params).sum()
+                all_pos[i], all_pos[j], all_species[i], all_species[j], opt_params
+            ).sum()
             return morse_energy + rep_energy
 
         all_pairwise_energies = vmap(pairwise_energy)(pairs)
         total_energy = all_pairwise_energies.sum()
-        
+
         # Print intermediate values for debugging
-        print(f"n = {n}")
-        print(f"positions = {positions}")
-        print(f"all_pos = {all_pos}")
-        print(f"species = {species}")
-        print(f"all_species = {all_species}")
-        print(f"all_pairwise_energies = {all_pairwise_energies}")
-        print(f"total_energy = {total_energy}")
-        
+
         return total_energy
 
     return nmer_energy_fn
+
 
 def hess(energy_fn, q, pos, species, opt_params):
     H = hessian(energy_fn)(q, pos, species, opt_params)
@@ -350,7 +357,9 @@ def hess(energy_fn, q, pos, species, opt_params):
 
 def compute_zvib(energy_fn, q, pos, species, opt_params):
     evals, _ = hess(energy_fn, q, pos, species, opt_params)
-    zvib = jnp.prod(jnp.sqrt(2.0 * jnp.pi / (opt_params[4]*(jnp.abs(evals[6:]) + 1e-12))))
+    zvib = jnp.prod(
+        jnp.sqrt(2.0 * jnp.pi / (opt_params[4] * (jnp.abs(evals[6:]) + 1e-12)))
+    )
     return zvib
 
 
@@ -361,11 +370,11 @@ def compute_zrot_mod_sigma(energy_fn, q, pos, species, opt_params, key, nrandom=
     def set_nu_random(key):
         quat = jts.random_quaternion(None, key)
         angles = jnp.array(jts.euler_from_quaternion(quat, euler_scheme))
-        nu0 = jnp.full((Nbb * 6,), 0.)
+        nu0 = jnp.full((Nbb * 6,), 0.0)
         return nu0.at[3:6].set(angles)
 
     def ftilde(nu):
-        nu = nu.astype(jnp.float32)  
+        nu = nu.astype(jnp.float32)
         q_tilde = jnp.matmul(evecs.T[6:].T, nu[6:])
         nu_tilde = jnp.reshape(jnp.array([nu[:6] for _ in range(Nbb)]), nu.shape)
         return utils.add_variables_all(q_tilde, nu_tilde)
@@ -375,8 +384,8 @@ def compute_zrot_mod_sigma(energy_fn, q, pos, species, opt_params, key, nrandom=
     nu_fn = lambda nu: jnp.abs(jnp.linalg.det(jacfwd(ftilde)(nu)))
     Js = vmap(nu_fn)(nus)
     J = jnp.mean(Js)
-    Jtilde = 8.0 * (jnp.pi ** 2) * J
-    return Jtilde, Js, key 
+    Jtilde = 8.0 * (jnp.pi**2) * J
+    return Jtilde, Js, key
 
 
 def compute_zc(boltzmann_weight, z_rot_mod_sigma, z_vib, sigma, V=V):
@@ -384,20 +393,22 @@ def compute_zc(boltzmann_weight, z_rot_mod_sigma, z_vib, sigma, V=V):
     z_rot = z_rot_mod_sigma / sigma
     return boltzmann_weight * z_trans * z_rot * z_vib
 
+
 def get_sigma(size):
 
     Nbb = size
 
-    if  Nbb  == 2 or  Nbb == 4:
+    if Nbb == 2 or Nbb == 4:
         s = 2
-    if  Nbb == 3:
+    if Nbb == 3:
         s = 3
-    elif  Nbb  == 12:
+    elif Nbb == 12:
         s = 12
     else:
         s = 1
-    
+
     return s
+
 
 def compute_zc(boltzmann_weight, z_rot_mod_sigma, z_vib, sigma, V=V):
     z_trans = V
@@ -406,19 +417,23 @@ def compute_zc(boltzmann_weight, z_rot_mod_sigma, z_vib, sigma, V=V):
 
 
 sigmas = [get_sigma(size) for size in range(1, 13)]
-coo_shell_full = get_icos_rb(ico_radius=1.0)
-adj_ma = are_blocks_connected_rb(coo_shell_full)
-rbs = generate_connected_subsets_rb(coo_shell_full, adj_ma)
+full_shell_coord = load_rb_orientation_vec(file_paths)
+print(full_shell_coord)
+# print(full_shell_coord.shape)
+adj_ma = are_blocks_connected_rb(full_shell_coord)
+rbs = generate_connected_subsets_rb(full_shell_coord, adj_ma)
 rbs = [rb.flatten() for rb in rbs]
-shapes_species = [get_icos_shape_and_species(coo_shell_full, vertex_radius, size) for size in range(1, 13)]
+shapes_species = [get_icos_shape_and_species(size) for size in range(1, 13)]
 shapes, species = zip(*shapes_species)
 
-energy_fns = {size: jit(get_nmer_energy_fn(size)) for size in range(2, 12+1)}
+energy_fns = {size: jit(get_nmer_energy_fn(size)) for size in range(2, 12 + 1)}
 
 mon_energy_fn = lambda q, pos, species, opt_params: 0.0
 
 
-zrot_mod_sigma_1,_, main_key = compute_zrot_mod_sigma(mon_energy_fn, rbs[0], shapes[0],  species[0], init_params, main_key)
+zrot_mod_sigma_1, _, main_key = compute_zrot_mod_sigma(
+    mon_energy_fn, rbs[0], shapes[0], species[0], init_params, main_key
+)
 zvib_1 = 1.0
 boltzmann_weight = 1.0
 
@@ -429,96 +444,47 @@ zrot_mod_sigma_values = []
 
 for size in range(2, 12 + 1):
     zrot_mod_sigma, Js, main_key = compute_zrot_mod_sigma(
-        energy_fns[size], 
-        rbs[size-1], 
-        shapes[size-1], 
-        species[size-1], 
-        init_params, 
-        main_key  
+        energy_fns[size],
+        rbs[size - 1],
+        shapes[size - 1],
+        species[size - 1],
+        init_params,
+        main_key,
     )
     zrot_mod_sigma_values.append(zrot_mod_sigma)
 
 print(zrot_mod_sigma_values)
 
-def safe_log(x, eps=1e-10):
-    return jnp.log(jnp.clip(x, a_min=eps, a_max=None))
 
-'''
 def get_log_z_all(opt_params):
     def compute_log_z(size):
         energy_fn = energy_fns[size]
-        shape = shapes[size-1]
-        rb = rbs[size-1]
-        specie = species[size-1]
-        sigma = sigmas[size-1]
-        zrot_mod_sigma = zrot_mod_sigma_values[size-2]  # Adjusted index to size-2
+        shape = shapes[size - 1]
+        # print(f"shape: {shape}")
+        rb = rbs[size - 1]
+        # print(f"rb: {rb}")
+        specie = species[size - 1]
+        sigma = sigmas[size - 1]
+        zrot_mod_sigma = zrot_mod_sigma_values[size - 2]
         zvib = compute_zvib(energy_fn, rb, shape, specie, opt_params)
-        zvib = jnp.maximum(zvib, 1e-12)
+        # zvib = jnp.maximum(zvib, 1e-12)
         e0 = energy_fn(rb, shape, species, opt_params)
-        boltzmann_weight = jnp.exp(-e0 /opt_params[4])
-        z = compute_zc(boltzmann_weight, zrot_mod_sigma, zvib, sigma)
-        z = jnp.maximum(z, 1e-12)
-        return safe_log(z)
-    
-    log_z_all = []
-    
-    for size in range(2, 12 + 1):
-        log_z = compute_log_z(size)
-        ###
-        if size <= 4:
-            log_z = compute_log_z(size)
-        else:
-            compute_log_z_ckpt = checkpoint(lambda: compute_log_z(size))
-            xs = jnp.array(sigmas)
-
-            def scan_fn(carry, x):
-                result = compute_log_z_ckpt()
-                return carry, result
-
-            checkpoint_freq = 10
-            scan_with_ckpt = functools.partial(checkpoint_scan, checkpoint_every=checkpoint_freq)
-            _, log_z = scan_with_ckpt(scan_fn, None, xs)
-            log_z = jnp.array(log_z)
-        ###
-        log_z_all.append(log_z)
-    log_z_all = jnp.array(log_z_all)  
-    #log_z_all = jnp.concatenate(log_z_all, axis=0)
-    print(log_z_all.shape)
-    log_z_all = jnp.concatenate([log_z_1, log_z_all], axis=0)
-
-    return log_z_all
-'''
-def get_log_z_all(opt_params):
-    def compute_log_z(size):
-        energy_fn = energy_fns[size]
-        shape = shapes[size-1]
-        print(f"shape: {shape}")
-        rb = rbs[size-1]
-        print(f"rb: {rb}")
-        specie = species[size-1]
-        sigma = sigmas[size-1]
-        zrot_mod_sigma = zrot_mod_sigma_values[size-2]  
-        zvib = compute_zvib(energy_fn, rb, shape, specie, opt_params)
-        zvib = jnp.maximum(zvib, 1e-12)
-        e0 = energy_fn(rb, shape, species, opt_params)    
         print(f"e0: {e0}")
         boltzmann_weight = jnp.exp(-e0 / opt_params[4])
         z = compute_zc(boltzmann_weight, zrot_mod_sigma, zvib, sigma)
-        z = jnp.maximum(z, 1e-12)
+        # z = jnp.maximum(z, 1e-12)
 
-        
-        log_z = safe_log(z)
+        log_z = jnp.log(z)
 
-        
         return log_z
-    
+
     log_z_all = []
-    
+
     for size in range(2, 12 + 1):
         log_z = compute_log_z(size)
         log_z_all.append(log_z)
-    
-    log_z_all = jnp.array(log_z_all)  
+
+    log_z_all = jnp.array(log_z_all)
     print(f"log_z_all shape: {log_z_all.shape}")
     log_z_all = jnp.concatenate([log_z_1, log_z_all], axis=0)
 
@@ -527,7 +493,46 @@ def get_log_z_all(opt_params):
 
 Z_test = get_log_z_all(init_params)
 print(Z_test)
-'''
+
+box_size = 30.0
+patch_radius = 0.5
+vertex_color = "43a5be"
+patch_color = "4fb06d"
+body_pos = pos72.reshape(-1, 3)
+assert len(body_pos.shape) == 2
+assert body_pos.shape[0] % 6 == 0
+n_vertices = body_pos.shape[0] // 6
+if n_vertices != 12:
+    print(f"WARNING: writing shell body with only {n_vertices} vertices")
+assert body_pos.shape[1] == 3
+
+box_def = f"boxMatrix {box_size} 0 0 0 {box_size} 0 0 0 {box_size}"
+vertex_def = f'def V "sphere {vertex_radius*2} {vertex_color}"'
+patch_def = f'def P "sphere {patch_radius*2} {patch_color}"'
+
+position_lines = list()
+for num_vertex in range(n_vertices):
+    vertex_start_idx = num_vertex * 6
+
+    # vertex center
+    vertex_center_pos = body_pos[vertex_start_idx]
+    vertex_line = (
+        f"V {vertex_center_pos[0]} {vertex_center_pos[1]} {vertex_center_pos[2]}"
+    )
+    position_lines.append(vertex_line)
+
+    for num_patch in range(5):
+        patch_pos = body_pos[vertex_start_idx + num_patch + 1]
+        patch_line = f"P {patch_pos[0]} {patch_pos[1]} {patch_pos[2]}"
+        position_lines.append(patch_line)
+
+all_lines = [box_def, vertex_def, patch_def] + position_lines + ["eof"]
+with open("my_test.pos", "w+") as of:
+    of.write("\n".join(all_lines))
+pdb.set_trace()
+
+
+"""
 nper_structure = jnp.arange(1, 13)
 init_conc = jnp.array([0.001])
 
@@ -584,4 +589,4 @@ q2 = q2.flatten()
 print(q2.shape)
 testing = compute_zrot_mod_sigma(get_nmer_energy_fn(2), q2, pos2, species2, params, main_key, nrandom=100000)
 print(testing)
-'''
+"""
