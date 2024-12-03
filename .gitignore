@@ -28,7 +28,8 @@ venv/
 # Logs and databases #
 ######################
 *.log             # Log files
-*.sqlite3         # SQLite databases
+*.sqlite3   
+*err      # SQLite databases
 
 # Compiled code #
 #################
@@ -71,3 +72,4 @@ venv/
 # Ignore all temporary files (starting with .#)
 .#*
 
+compute_grandcan.pyßß
