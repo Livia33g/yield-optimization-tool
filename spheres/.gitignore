@@ -72,5 +72,8 @@ venv/
 
 # Ignore all temporary files (starting with .#)
 .#*
+*.out
+*.err
+*.sh
 
 compute_grandcan.py
