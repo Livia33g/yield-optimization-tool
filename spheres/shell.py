@@ -16,6 +16,9 @@ from jax import (
     checkpoint,
     clear_backends,
 )
+import os
+import optax
+from jaxopt import implicit_diff, GradientDescent
 from checkpoint import checkpoint_scan
 import functools
 import jax.numpy as jnp
@@ -38,7 +41,9 @@ V = 54000.0
 SEED = 42
 main_key = random.PRNGKey(SEED)
 
-init_params = jnp.array([7.0, 2.5, 5.0, 500, 1.0])
+init_params = jnp.array(
+    [1.0, 2.5, 5.0, 1.0, 1.0]
+)  # morse_eps, morse_alpha, rep_A, rep_alpha, kbT
 displacement_fn, shift_fn = space.free()
 
 
@@ -318,7 +323,7 @@ def hess(energy_fn, q, pos, species, opt_params):
 def compute_zvib(energy_fn, q, pos, species, opt_params):
     evals, _ = hess(energy_fn, q, pos, species, opt_params)
     zvib = jnp.prod(
-        jnp.sqrt(2.0 * jnp.pi / (opt_params[4] * (jnp.abs(evals[6:]) + 1e-12)))
+        jnp.sqrt(2.0 * jnp.pi / ((1 / opt_params[4]) * (jnp.abs(evals[6:]) + 1e-12)))
     )
     return zvib
 
@@ -385,46 +390,55 @@ rbs = generate_connected_subsets_rb(full_shell_coord, adj_ma)
 rbs = [rb.flatten() for rb in rbs]
 shapes_species = [get_icos_shape_and_species(size) for size in range(1, 13)]
 shapes, species = zip(*shapes_species)
-"""
-pos72 = utils.get_positions(rbs[-1], shapes_species[-1][0])
-vertex_radius = 2.0
 
+import os
 
-box_size = 30.0
-patch_radius = 0.5
-vertex_color = "43a5be"
-patch_color = "4fb06d"
-body_pos = pos72.reshape(-1, 3)
-assert len(body_pos.shape) == 2
-assert body_pos.shape[0] % 6 == 0
-n_vertices = body_pos.shape[0] // 6
-if n_vertices != 12:
-    print(f"WARNING: writing shell body with only {n_vertices} vertices")
-assert body_pos.shape[1] == 3
+# Create the directory if it doesn't exist
+output_dir = "pos_files"
+os.makedirs(output_dir, exist_ok=True)
 
-box_def = f"boxMatrix {box_size} 0 0 0 {box_size} 0 0 0 {box_size}"
-vertex_def = f'def V "sphere {vertex_radius*2} {vertex_color}"'
-patch_def = f'def P "sphere {patch_radius*2} {patch_color}"'
+for inx in range(12):
+    pos72 = utils.get_positions(rbs[inx], shapes_species[inx][0])
+    vertex_radius = 2.0
 
-position_lines = list()
-for num_vertex in range(n_vertices):
-    vertex_start_idx = num_vertex * 6
+    box_size = 30.0
+    patch_radius = 0.5
+    vertex_color = "43a5be"
+    patch_color = "4fb06d"
+    body_pos = pos72.reshape(-1, 3)
+    assert len(body_pos.shape) == 2
+    assert body_pos.shape[0] % 6 == 0
+    n_vertices = body_pos.shape[0] // 6
+    if n_vertices != 12:
+        print(f"WARNING: writing shell body with only {n_vertices} vertices")
+    assert body_pos.shape[1] == 3
 
-    # vertex center
-    vertex_center_pos = body_pos[vertex_start_idx]
-    vertex_line = (
-        f"V {vertex_center_pos[0]} {vertex_center_pos[1]} {vertex_center_pos[2]}"
-    )
-    position_lines.append(vertex_line)
+    box_def = f"boxMatrix {box_size} 0 0 0 {box_size} 0 0 0 {box_size}"
+    vertex_def = f'def V "sphere {vertex_radius*2} {vertex_color}"'
+    patch_def = f'def P "sphere {patch_radius*2} {patch_color}"'
 
-    for num_patch in range(5):
-        patch_pos = body_pos[vertex_start_idx + num_patch + 1]
-        patch_line = f"P {patch_pos[0]} {patch_pos[1]} {patch_pos[2]}"
-        position_lines.append(patch_line)
+    position_lines = list()
+    for num_vertex in range(n_vertices):
+        vertex_start_idx = num_vertex * 6
 
-all_lines = [box_def, vertex_def, patch_def] + position_lines + ["eof"]
-with open("my_test.pos", "w+") as of:
-    of.write("\n".join(all_lines))
+        # vertex center
+        vertex_center_pos = body_pos[vertex_start_idx]
+        vertex_line = (
+            f"V {vertex_center_pos[0]} {vertex_center_pos[1]} {vertex_center_pos[2]}"
+        )
+        position_lines.append(vertex_line)
+
+        for num_patch in range(5):
+            patch_pos = body_pos[vertex_start_idx + num_patch + 1]
+            patch_line = f"P {patch_pos[0]} {patch_pos[1]} {patch_pos[2]}"
+            position_lines.append(patch_line)
+
+    all_lines = [box_def, vertex_def, patch_def] + position_lines + ["eof"]
+    
+    # Write to a new .pos file for each index
+    output_file = os.path.join(output_dir, f"shell_{inx}.pos")
+    with open(output_file, "w+") as of:
+        of.write("\n".join(all_lines))
 
 pdb.set_trace()
 """
@@ -455,8 +469,6 @@ for size in range(2, 12 + 1):
     )
     zrot_mod_sigma_values.append(zrot_mod_sigma)
 
-print(zrot_mod_sigma_values)
-
 
 def get_log_z_all(opt_params):
     def compute_log_z(size):
@@ -471,7 +483,6 @@ def get_log_z_all(opt_params):
         zvib = compute_zvib(energy_fn, rb, shape, specie, opt_params)
         # zvib = jnp.maximum(zvib, 1e-12)
         e0 = energy_fn(rb, shape, species, opt_params)
-        print(f"e0: {e0}")
         boltzmann_weight = jnp.exp(-e0 / opt_params[4])
         log_z = (
             (-e0 / opt_params[4])
@@ -495,71 +506,150 @@ def get_log_z_all(opt_params):
         log_z_all.append(log_z)
 
     log_z_all = jnp.array(log_z_all)
-    print(f"log_z_all shape: {log_z_all.shape}")
     log_z_all = jnp.concatenate([log_z_1, log_z_all], axis=0)
 
     return log_z_all
 
 
-Z_test = get_log_z_all(init_params)
-print(Z_test)
-
-
-"""
 nper_structure = jnp.arange(1, 13)
 init_conc = jnp.array([0.001])
 
-def loss_fn(log_concs_struc, log_z_list, opt_params):
-    m_conc = opt_params[-n:]
-    tot_conc = init_conc 
-    log_mon_conc = safe_log(m_conc)
-    
-    def mon_loss_fn(mon_idx):
-        mon_val = safe_log(jnp.dot(nper_structure[mon_idx], jnp.exp(log_concs_struc)))
-        return jnp.sqrt((mon_val - log_mon_conc[mon_idx])**2)
+
+def loss_fn(log_concs_struc, log_z_list):
+    tot_conc = init_conc
+    log_mon_conc = jnp.log(tot_conc)
+
+    mon_val = jnp.log(jnp.dot(nper_structure, jnp.exp(log_concs_struc)))
+    mon_loss = jnp.sqrt((mon_val - log_mon_conc) ** 2).squeeze()
+
 
     def struc_loss_fn(struc_idx):
         log_vcs = jnp.log(V) + log_concs_struc[struc_idx]
 
-        def get_vcs_denom(mon_idx):
-            n_sa = nper_structure[mon_idx][struc_idx]
-            log_vca = jnp.log(V) + log_concs_struc[mon_idx]
-            return n_sa * log_vca
-
-        vcs_denom = vmap(get_vcs_denom)(jnp.arange(num_monomers)).sum()
+        n_sa = nper_structure[struc_idx]
+        log_vca = jnp.log(V) + log_concs_struc[struc_idx]
+        vcs_denom = n_sa * log_vca
         log_zs = log_z_list[struc_idx]
 
-        def get_z_denom(mon_idx):
-            n_sa = nper_structure[mon_idx][struc_idx]
-            log_zalpha = log_z_list[mon_idx]
-            return n_sa * log_zalpha
+        log_zalpha = log_z_list[struc_idx]
+        z_denom = n_sa * log_zalpha
 
-        z_denom = vmap(get_z_denom)(jnp.arange(num_monomers)).sum()
+        # Compute loss
+        loss = jnp.sqrt((log_vcs - vcs_denom - log_zs + z_denom) ** 2)
 
-        return jnp.sqrt((log_vcs - vcs_denom - log_zs + z_denom)**2)
+        return loss
+
     
-    mon_loss = vmap(mon_loss_fn)(jnp.arange(num_monomers))
-    struc_loss = vmap(struc_loss_fn)(jnp.arange(num_monomers, tot_num_structures))
-    combined_loss = jnp.concatenate([mon_loss, struc_loss])
+    struc_loss = vmap(struc_loss_fn)(jnp.arange(12))
+    combined_loss = jnp.concatenate([jnp.array([mon_loss]), struc_loss])  # Add mon_loss to combined_loss as a 1D array
     loss_var = jnp.var(combined_loss)
-    loss_max = jnp.max(combined_loss)
+
+    loss_var = jnp.var(combined_loss)
+    # loss_max = jnp.max(combined_loss)
 
     tot_loss = jnp.linalg.norm(combined_loss) + loss_var
     return tot_loss, combined_loss, loss_var
 
 
-coo_shell_full = get_icos_rb(ico_radius=1.0)
-pos2, species2 = get_icos_shape_and_species(coo_shell_full, vertex_radius, 2)
-sigma2 = get_sigma(pos2)
-adj_matrix = are_blocks_connected_rb(coo_shell_full, vertex_radius=1.0)
-q2 = generate_connected_subsets_rb(coo_shell_full, adj_matrix)[-2]
+def optimality_fn(log_concs_struc, log_z_list):
+    return grad(
+        lambda log_concs_struc, log_z_list: loss_fn(log_concs_struc, log_z_list)[0]
+    )(log_concs_struc, log_z_list)
 
 
-SEED = 42
-main_key = random.PRNGKey(SEED)
+@implicit_diff.custom_root(optimality_fn)
+def inner_solver(init_guess, log_z_list):
+    gd = GradientDescent(
+        fun=lambda log_concs_struc, log_z_list: loss_fn(log_concs_struc, log_z_list)[0],
+        maxiter=50000,
+        implicit_diff=True,
+    )
+    sol = gd.run(init_guess, log_z_list)
 
-q2 = q2.flatten()
-print(q2.shape)
-testing = compute_zrot_mod_sigma(get_nmer_energy_fn(2), q2, pos2, species2, params, main_key, nrandom=100000)
-print(testing)
+    final_params = sol.params
+    final_loss, combined_losses, _ = loss_fn(final_params, log_z_list)
+    max_loss = jnp.max(combined_losses)
+    second_max_loss = jnp.partition(combined_losses, -2)[-2]
+
+    return final_params
+
+
+def ofer(opt_params):
+    log_z_list = get_log_z_all(opt_params)
+    tot_conc = init_conc
+    struc_concs_guess = jnp.full(12, jnp.log(0.001 / 12))
+    fin_log_concs = inner_solver(struc_concs_guess, log_z_list)
+    fin_concs = jnp.exp(fin_log_concs)
+    yields = fin_concs / jnp.sum(fin_concs)
+    target_yield = jnp.log(yields[-1])
+    return target_yield
+
+
+def ofer_grad_fn(opt_params, desired_yield_val):
+    target_yield = ofer(opt_params)
+    loss = (desired_yield_val - jnp.exp(target_yield)) ** 2
+    return loss
+
+
+num_params = len(init_params)
+mask = jnp.zeros(num_params)
+mask = mask.at[:3].set(1.0)
+
+
+def masked_grads(grads):
+    return grads * mask
+
+
+#our_grad_fn = jit(value_and_grad(ofer_grad_fn, has_aux=False))
+our_grad_fn = value_and_grad(ofer_grad_fn, has_aux=False)
+params = init_params
+outer_optimizer = optax.adam(1e-2)
+opt_state = outer_optimizer.init(params)
+
+n_outer_iters = 400
+outer_losses = []
+
+
+param_names = [f"morse_eps"]
+param_names += [f"morse_alpha"]
+param_names += [f"rep_A"]
+param_names += [f"rep_alpha"]
+param_names += [f"kbT"]
+
+
+desired_yields_range = jnp.array([0.3])
+os.makedirs("shell_params", exist_ok=True)
+
+with open("shell_params/shell_params_test.txt", "w") as f:
+    for des_yield in desired_yields_range:
+
+        for i in tqdm(range(n_outer_iters)):
+            loss, grads = our_grad_fn(params, des_yield)
+            # outer_losses.append(loss)
+            grads = masked_grads(grads)
+            updates, opt_state = outer_optimizer.update(grads, opt_state)
+            params = optax.apply_updates(params, updates)
+            # params = project(params)
+            print("Updated Parameters:")
+            for name, value in {
+                name: params[idx] for idx, name in enumerate(param_names)
+            }.items():
+                print(f"{name}: {value}")
+            print(params)
+            fin_yield = ofer(params)
+            fin_yield = jnp.exp(fin_yield)
+            print(f"Desired Yield: {des_yield}, Yield: {fin_yield}")
+
+        final_params = params
+        fin_yield = ofer(params)
+        final_target_yields = jnp.exp(fin_yield)
+
+        f.write(
+            f"{des_yield},{final_target_yields},{params[0]},{params[1]},{params[2]}\n"
+        )
+        # f.write(f"{des_yield}, {final_target_yields}, {params[3]}\n")
+        f.flush()
+
+
+print("All results saved.")
 """
