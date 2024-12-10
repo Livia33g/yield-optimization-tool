@@ -66,7 +66,7 @@ if __name__ == "__main__":
 
         for pos_file in os.listdir(pos_files_folder):
             file_path = os.path.join(pos_files_folder, pos_file)
-            coords = load_coordinates_vertices_only(file_path)
+            coords = load_coordinates(file_path)
             if coords.size == 0:
                 f.write(f"{pos_file},No vertices found\n")
                 continue
