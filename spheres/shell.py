@@ -42,7 +42,7 @@ SEED = 42
 main_key = random.PRNGKey(SEED)
 
 init_params = jnp.array(
-    [1.0, 2.5, 5.0, 1.0, 1.0]
+    [2.0, 2.5, 5.0, 1.0, 1.0]
 )  # morse_eps, morse_alpha, rep_A, rep_alpha, kbT
 displacement_fn, shift_fn = space.free()
 
@@ -358,21 +358,27 @@ def compute_zc(boltzmann_weight, z_rot_mod_sigma, z_vib, sigma, V=V):
     z_rot = z_rot_mod_sigma / sigma
     return boltzmann_weight * z_trans * z_rot * z_vib
 
+def load_sigmas(file_path):
+    sigmas = {}
+    with open(file_path, 'r') as file:
+        next(file)  # Skip the header line
+        for line in file:
+            try:
+                shell, sigma = line.strip().split(',')
+                size = int(shell.split('_')[1].split('.')[0])
+                sigmas[size] = int(sigma)
+            except (IndexError, ValueError) as e:
+                print(f"Error parsing line: {line.strip()} - {e}")
+    return sigmas
 
-def get_sigma(size):
-
-    Nbb = size
-
-    if Nbb == 2 or Nbb == 4:
-        s = 2
-    if Nbb == 3:
-        s = 3
-    elif Nbb == 12:
-        s = 12
-    else:
-        s = 1
-
-    return s
+def adjust_sigmas(sigmas):
+    adjusted_sigmas = {}
+    for size, sigma in sigmas.items():
+        if size > 1:
+            adjusted_sigmas[size] = sigma * (5 ** size)
+        else:
+            adjusted_sigmas[size] = 1
+    return adjusted_sigmas
 
 
 def compute_zc(boltzmann_weight, z_rot_mod_sigma, z_vib, sigma, V=V):
@@ -381,7 +387,10 @@ def compute_zc(boltzmann_weight, z_rot_mod_sigma, z_vib, sigma, V=V):
     return boltzmann_weight * z_trans * z_rot * z_vib
 
 
-sigmas = [get_sigma(size) for size in range(1, 13)]
+sigmas_ext = load_sigmas("symmetry_numbers.txt")
+sigmas = adjust_sigmas(sigmas_ext)
+
+
 full_shell_coord = load_rb_orientation_vec(file_paths)[0]
 # print(full_shell_coord)
 # print(full_shell_coord.shape)
@@ -390,7 +399,7 @@ rbs = generate_connected_subsets_rb(full_shell_coord, adj_ma)
 rbs = [rb.flatten() for rb in rbs]
 shapes_species = [get_icos_shape_and_species(size) for size in range(1, 13)]
 shapes, species = zip(*shapes_species)
-
+"""
 import os
 
 # Create the directory if it doesn't exist
@@ -402,7 +411,7 @@ for inx in range(12):
     vertex_radius = 2.0
 
     box_size = 30.0
-    patch_radius = 0.5
+    patch_radius = 0.01
     vertex_color = "43a5be"
     patch_color = "4fb06d"
     body_pos = pos72.reshape(-1, 3)
@@ -453,7 +462,7 @@ zrot_mod_sigma_1, _, main_key = compute_zrot_mod_sigma(
 zvib_1 = 1.0
 boltzmann_weight = 1.0
 
-z_1 = jnp.array([compute_zc(boltzmann_weight, zrot_mod_sigma_1, zvib_1, sigmas[0])])
+z_1 = jnp.array([compute_zc(boltzmann_weight, zrot_mod_sigma_1, zvib_1, sigmas[1])])
 log_z_1 = jnp.log(z_1)
 
 zrot_mod_sigma_values = []
@@ -478,7 +487,7 @@ def get_log_z_all(opt_params):
         rb = rbs[size - 1]
         # print(f"rb: {rb}")
         specie = species[size - 1]
-        sigma = sigmas[size - 1]
+        sigma = sigmas[size] ####
         zrot_mod_sigma = zrot_mod_sigma_values[size - 2]
         zvib = compute_zvib(energy_fn, rb, shape, specie, opt_params)
         # zvib = jnp.maximum(zvib, 1e-12)
@@ -540,7 +549,7 @@ def loss_fn(log_concs_struc, log_z_list):
         return loss
 
     
-    struc_loss = vmap(struc_loss_fn)(jnp.arange(12))
+    struc_loss = vmap(struc_loss_fn)(jnp.arange(1, 13))
     combined_loss = jnp.concatenate([jnp.array([mon_loss]), struc_loss])  # Add mon_loss to combined_loss as a 1D array
     loss_var = jnp.var(combined_loss)
 
@@ -593,20 +602,19 @@ def ofer_grad_fn(opt_params, desired_yield_val):
 
 num_params = len(init_params)
 mask = jnp.zeros(num_params)
-mask = mask.at[:3].set(1.0)
-
+#mask = mask.at[0].set(1.0)
+mask = mask.at[-1].set(1.0)
 
 def masked_grads(grads):
     return grads * mask
 
 
-#our_grad_fn = jit(value_and_grad(ofer_grad_fn, has_aux=False))
-our_grad_fn = value_and_grad(ofer_grad_fn, has_aux=False)
+our_grad_fn = jit(value_and_grad(ofer_grad_fn, has_aux=False))
 params = init_params
 outer_optimizer = optax.adam(1e-2)
 opt_state = outer_optimizer.init(params)
 
-n_outer_iters = 400
+n_outer_iters = 500
 outer_losses = []
 
 
@@ -617,10 +625,14 @@ param_names += [f"rep_alpha"]
 param_names += [f"kbT"]
 
 
-desired_yields_range = jnp.array([0.3])
-os.makedirs("shell_params", exist_ok=True)
 
-with open("shell_params/shell_params_test.txt", "w") as f:
+desired_yields_range = jnp.array([0.1, 0.2])
+
+
+
+os.makedirs("Temperature", exist_ok=True)
+
+with open("Temperature/shell_eps12.txt", "w") as f:
     for des_yield in desired_yields_range:
 
         for i in tqdm(range(n_outer_iters)):
@@ -629,7 +641,7 @@ with open("shell_params/shell_params_test.txt", "w") as f:
             grads = masked_grads(grads)
             updates, opt_state = outer_optimizer.update(grads, opt_state)
             params = optax.apply_updates(params, updates)
-            # params = project(params)
+            #params = project(params)
             print("Updated Parameters:")
             for name, value in {
                 name: params[idx] for idx, name in enumerate(param_names)
@@ -644,12 +656,14 @@ with open("shell_params/shell_params_test.txt", "w") as f:
         fin_yield = ofer(params)
         final_target_yields = jnp.exp(fin_yield)
 
-        f.write(
-            f"{des_yield},{final_target_yields},{params[0]},{params[1]},{params[2]}\n"
-        )
-        # f.write(f"{des_yield}, {final_target_yields}, {params[3]}\n")
-        f.flush()
+        #f.write(f"{des_yield},{final_target_yields},{params[0]}\n")
+        f.write(f"{des_yield}, {final_target_yields}, {params[-1]}\n")
+        f.flush() 
 
 
 print("All results saved.")
-"""
+
+
+
+
+

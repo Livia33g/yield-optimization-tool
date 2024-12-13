@@ -1,0 +1,13 @@
+File Name,Symmetry Number
+shell_11.pos,10
+shell_10.pos,4
+shell_9.pos,3
+shell_8.pos,4
+shell_7.pos,1
+shell_6.pos,1
+shell_4.pos,1
+shell_3.pos,2
+shell_2.pos,3
+shell_1.pos,10
+shell_12.pos,60
+shell_5.pos,1
