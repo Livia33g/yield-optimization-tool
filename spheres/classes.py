@@ -42,7 +42,7 @@ SEED = 42
 main_key = random.PRNGKey(SEED)
 
 init_params = jnp.array(
-    [1.0, 2.5, 1e-12, 1.0, 1.0]
+    [2.0, 2.5, 1e-12, 2.0, 1.0]
 )  # morse_eps, morse_alpha, rep_A, rep_alpha, kbT
 displacement_fn, shift_fn = space.free()
 
@@ -218,12 +218,14 @@ def generate_connected_subsets_rb(vertex_coords, adj_matrix):
 # configs_rb = generate_connected_subsets_rb(rb_data, adj_matrix_rb)
 
 # print(configs_rb[0])
-vertex_species = 0
-n_species = 2
-vertex_radius = 2.0
-small_value = 1e-12
+class InteractionTables:
+    def __init__(self, n_species, vertex_species, vertex_radius, small_value):
+        self.n_species = n_species
+        self.vertex_species = vertex_species
+        self.vertex_radius = vertex_radius
+        self.small_value = small_value
+        self.rep_rmax_table = jnp.full((n_species, n_species), 2 * vertex_radius)
 
-rep_rmax_table = jnp.full((n_species, n_species), 2 * vertex_radius)
 
 
 def make_tables(opt_params):
@@ -323,7 +325,7 @@ def hess(energy_fn, q, pos, species, opt_params):
 def compute_zvib(energy_fn, q, pos, species, opt_params):
     evals, _ = hess(energy_fn, q, pos, species, opt_params)
     zvib = jnp.prod(
-        jnp.sqrt(2.0 * jnp.pi / ((opt_params[4]) * (jnp.abs(evals[6:]) + 1e-12)))
+        jnp.sqrt(2.0 * jnp.pi / ((1 / opt_params[4]) * (jnp.abs(evals[6:]) + 1e-12)))
     )
     return zvib
 
@@ -358,26 +360,24 @@ def compute_zc(boltzmann_weight, z_rot_mod_sigma, z_vib, sigma, V=V):
     z_rot = z_rot_mod_sigma / sigma
     return boltzmann_weight * z_trans * z_rot * z_vib
 
-
 def load_sigmas(file_path):
     sigmas = {}
-    with open(file_path, "r") as file:
+    with open(file_path, 'r') as file:
         next(file)  # Skip the header line
         for line in file:
             try:
-                shell, sigma = line.strip().split(",")
-                size = int(shell.split("_")[1].split(".")[0])
+                shell, sigma = line.strip().split(',')
+                size = int(shell.split('_')[1].split('.')[0])
                 sigmas[size] = int(sigma)
             except (IndexError, ValueError) as e:
                 print(f"Error parsing line: {line.strip()} - {e}")
     return sigmas
 
-
 def adjust_sigmas(sigmas):
     adjusted_sigmas = {}
     for size, sigma in sigmas.items():
         if size > 1:
-            adjusted_sigmas[size] = sigma * (5**size)
+            adjusted_sigmas[size] = sigma * (5 ** size)
         else:
             adjusted_sigmas[size] = 1
     return adjusted_sigmas
@@ -486,32 +486,33 @@ for size in range(2, 12 + 1):
 def get_log_z_all(opt_params):
     def compute_log_z(size):
         energy_fn = energy_fns[size]
-        # pdb.set_trace()
         shape = shapes[size - 1]
         # print(f"shape: {shape}")
         rb = rbs[size - 1]
         # print(f"rb: {rb}")
         specie = species[size - 1]
-        sigma = sigmas[size]
+        sigma = sigmas[size] ####
         zrot_mod_sigma = zrot_mod_sigma_values[size - 2]
         zvib = compute_zvib(energy_fn, rb, shape, specie, opt_params)
+        # zvib = jnp.maximum(zvib, 1e-12)
         e0 = energy_fn(rb, shape, species, opt_params)
         boltzmann_weight = jnp.exp(-e0 / opt_params[4])
         z = compute_zc(boltzmann_weight, zrot_mod_sigma, zvib, sigma)
+        # z = compute_zc(boltzmann_weight, zrot_mod_sigma, zvib, sigma)
+        # z = jnp.maximum(z, 1e-12)
+
         log_z = jnp.log(z)
 
         return log_z
 
-    log_z_struc = []
+    log_z_all = []
 
     for size in range(2, 12 + 1):
         log_z = compute_log_z(size)
-        log_z_struc.append(log_z)
+        log_z_all.append(log_z)
 
-    log_z_struc = jnp.array(log_z_struc)
-
-    log_z_all = jnp.concatenate([log_z_1, log_z_struc], axis=0)
-    # print(f"log_z_all: {log_z_all}")
+    log_z_all = jnp.array(log_z_all)
+    log_z_all = jnp.concatenate([log_z_1, log_z_all], axis=0)
 
     return log_z_all
 
@@ -526,6 +527,7 @@ def loss_fn(log_concs_struc, log_z_list):
 
     mon_val = jnp.log(jnp.dot(nper_structure, jnp.exp(log_concs_struc)))
     mon_loss = jnp.sqrt((mon_val - log_mon_conc) ** 2).squeeze()
+
 
     def struc_loss_fn(struc_idx):
         log_vcs = jnp.log(V) + log_concs_struc[struc_idx]
@@ -543,10 +545,9 @@ def loss_fn(log_concs_struc, log_z_list):
 
         return loss
 
-    struc_loss = vmap(struc_loss_fn)(jnp.arange(1, 12))
-    combined_loss = jnp.concatenate(
-        [jnp.array([mon_loss]), struc_loss]
-    )  # Add mon_loss to combined_loss as a 1D array
+    
+    struc_loss = vmap(struc_loss_fn)(jnp.arange(1, 13))
+    combined_loss = jnp.concatenate([jnp.array([mon_loss]), struc_loss])  # Add mon_loss to combined_loss as a 1D array
     loss_var = jnp.var(combined_loss)
 
     loss_var = jnp.var(combined_loss)
@@ -592,15 +593,14 @@ def ofer(opt_params):
 
 def ofer_grad_fn(opt_params, desired_yield_val):
     target_yield = ofer(opt_params)
-    loss = jnp.linalg.norm(desired_yield_val - jnp.exp(target_yield))
+    loss = (desired_yield_val - jnp.exp(target_yield)) ** 2
     return loss
 
 
 num_params = len(init_params)
 mask = jnp.zeros(num_params)
-# mask = mask.at[0].set(1.0)
+#mask = mask.at[0].set(1.0)
 mask = mask.at[-1].set(1.0)
-
 
 def masked_grads(grads):
     return grads * mask
@@ -611,7 +611,7 @@ params = init_params
 outer_optimizer = optax.adam(1e-2)
 opt_state = outer_optimizer.init(params)
 
-n_outer_iters = 200
+n_outer_iters = 300
 outer_losses = []
 
 
@@ -622,12 +622,14 @@ param_names += [f"rep_alpha"]
 param_names += [f"kbT"]
 
 
-desired_yields_range = jnp.array([0.9, 1.0])
+
+desired_yields_range = jnp.array([0.4, 0.5])
+
 
 
 os.makedirs("Temp", exist_ok=True)
 
-with open("Temp/temp_12.txt", "w") as f:
+with open("Temp/temp_2.txt", "w") as f:
     for des_yield in desired_yields_range:
 
         for i in tqdm(range(n_outer_iters)):
@@ -636,7 +638,7 @@ with open("Temp/temp_12.txt", "w") as f:
             grads = masked_grads(grads)
             updates, opt_state = outer_optimizer.update(grads, opt_state)
             params = optax.apply_updates(params, updates)
-            # params = project(params)
+            #params = project(params)
             print("Updated Parameters:")
             for name, value in {
                 name: params[idx] for idx, name in enumerate(param_names)
@@ -652,8 +654,13 @@ with open("Temp/temp_12.txt", "w") as f:
         final_target_yields = jnp.exp(fin_yield)
 
         f.write(f"{des_yield},{final_target_yields},{params[-1]}\n")
-        # f.write(f"{des_yield}, {final_target_yields}, {params[0]}, {params[-1]}\n")
-        f.flush()
+        #f.write(f"{des_yield}, {final_target_yields}, {params[0]}, {params[-1]}\n")
+        f.flush() 
 
 
 print("All results saved.")
+
+
+
+
+

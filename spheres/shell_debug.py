@@ -622,7 +622,7 @@ param_names += [f"rep_alpha"]
 param_names += [f"kbT"]
 
 
-desired_yields_range = jnp.array([0.9, 1.0])
+desired_yields_range = jnp.array([0.1, 0.2])
 
 
 os.makedirs("Temp", exist_ok=True)

@@ -42,7 +42,7 @@ SEED = 42
 main_key = random.PRNGKey(SEED)
 
 init_params = jnp.array(
-    [1.0, 2.5, 1e-12, 1.0, 1.0]
+    [2.0, 2.5, 1e-12, 1.0, 0.5]
 )  # morse_eps, morse_alpha, rep_A, rep_alpha, kbT
 displacement_fn, shift_fn = space.free()
 
@@ -358,26 +358,24 @@ def compute_zc(boltzmann_weight, z_rot_mod_sigma, z_vib, sigma, V=V):
     z_rot = z_rot_mod_sigma / sigma
     return boltzmann_weight * z_trans * z_rot * z_vib
 
-
 def load_sigmas(file_path):
     sigmas = {}
-    with open(file_path, "r") as file:
+    with open(file_path, 'r') as file:
         next(file)  # Skip the header line
         for line in file:
             try:
-                shell, sigma = line.strip().split(",")
-                size = int(shell.split("_")[1].split(".")[0])
+                shell, sigma = line.strip().split(',')
+                size = int(shell.split('_')[1].split('.')[0])
                 sigmas[size] = int(sigma)
             except (IndexError, ValueError) as e:
                 print(f"Error parsing line: {line.strip()} - {e}")
     return sigmas
 
-
 def adjust_sigmas(sigmas):
     adjusted_sigmas = {}
     for size, sigma in sigmas.items():
         if size > 1:
-            adjusted_sigmas[size] = sigma * (5**size)
+            adjusted_sigmas[size] = sigma * (5 ** size)
         else:
             adjusted_sigmas[size] = 1
     return adjusted_sigmas
@@ -455,7 +453,7 @@ for inx in range(12):
 
 pdb.set_trace()
 """
-energy_fns = {size: jit(get_nmer_energy_fn(size)) for size in range(2, 12 + 1)}
+energy_fns = {12: jit(get_nmer_energy_fn(12))}
 
 mon_energy_fn = lambda q, pos, species, opt_params: 0.0
 
@@ -469,54 +467,42 @@ boltzmann_weight = 1.0
 z_1 = jnp.array([compute_zc(boltzmann_weight, zrot_mod_sigma_1, zvib_1, sigmas[1])])
 log_z_1 = jnp.log(z_1)
 
-zrot_mod_sigma_values = []
+zrot_mod_sigma, Js, main_key = compute_zrot_mod_sigma(
+    energy_fns[12],
+    rbs[11],  # Size 12 corresponds to index 11 in zero-based indexing
+    shapes[11],
+    species[11],
+    init_params,
+    main_key,
+)
+zrot_mod_sigma_values = [zrot_mod_sigma]
 
-for size in range(2, 12 + 1):
-    zrot_mod_sigma, Js, main_key = compute_zrot_mod_sigma(
-        energy_fns[size],
-        rbs[size - 1],
-        shapes[size - 1],
-        species[size - 1],
-        init_params,
-        main_key,
-    )
-    zrot_mod_sigma_values.append(zrot_mod_sigma)
 
 
 def get_log_z_all(opt_params):
-    def compute_log_z(size):
-        energy_fn = energy_fns[size]
-        # pdb.set_trace()
-        shape = shapes[size - 1]
-        # print(f"shape: {shape}")
-        rb = rbs[size - 1]
-        # print(f"rb: {rb}")
-        specie = species[size - 1]
-        sigma = sigmas[size]
-        zrot_mod_sigma = zrot_mod_sigma_values[size - 2]
-        zvib = compute_zvib(energy_fn, rb, shape, specie, opt_params)
-        e0 = energy_fn(rb, shape, species, opt_params)
-        boltzmann_weight = jnp.exp(-e0 / opt_params[4])
-        z = compute_zc(boltzmann_weight, zrot_mod_sigma, zvib, sigma)
-        log_z = jnp.log(z)
+    energy_fn = energy_fns[12]
+    shape = shapes[11]
+    rb = rbs[11]
+    specie = species[11]
+    sigma = sigmas[12]
+    zrot_mod_sigma = zrot_mod_sigma_values[0]
+    zvib = compute_zvib(energy_fn, rb, shape, specie, opt_params)
+    e0 = energy_fn(rb, shape, specie, opt_params)
+    boltzmann_weight = jnp.exp(-e0 / opt_params[4])
+    log_z = (
+        (-e0 / opt_params[4])
+        + jnp.log(zvib)
+        + jnp.log(zrot_mod_sigma)
+        + jnp.log(V)
+        - jnp.log(sigma)
+    )
+    log_z_all = jnp.array([log_z])
+    log_zs = jnp.concatenate([log_z_1, log_z_all], axis=0)
 
-        return log_z
-
-    log_z_struc = []
-
-    for size in range(2, 12 + 1):
-        log_z = compute_log_z(size)
-        log_z_struc.append(log_z)
-
-    log_z_struc = jnp.array(log_z_struc)
-
-    log_z_all = jnp.concatenate([log_z_1, log_z_struc], axis=0)
-    # print(f"log_z_all: {log_z_all}")
-
-    return log_z_all
+    return log_zs
 
 
-nper_structure = jnp.arange(1, 13)
+nper_structure = jnp.array([1, 12])
 init_conc = jnp.array([0.001])
 
 
@@ -526,6 +512,7 @@ def loss_fn(log_concs_struc, log_z_list):
 
     mon_val = jnp.log(jnp.dot(nper_structure, jnp.exp(log_concs_struc)))
     mon_loss = jnp.sqrt((mon_val - log_mon_conc) ** 2).squeeze()
+
 
     def struc_loss_fn(struc_idx):
         log_vcs = jnp.log(V) + log_concs_struc[struc_idx]
@@ -543,10 +530,9 @@ def loss_fn(log_concs_struc, log_z_list):
 
         return loss
 
-    struc_loss = vmap(struc_loss_fn)(jnp.arange(1, 12))
-    combined_loss = jnp.concatenate(
-        [jnp.array([mon_loss]), struc_loss]
-    )  # Add mon_loss to combined_loss as a 1D array
+    
+    struc_loss = vmap(struc_loss_fn)(jnp.arange(1, 13))
+    combined_loss = jnp.concatenate([jnp.array([mon_loss]), struc_loss])  # Add mon_loss to combined_loss as a 1D array
     loss_var = jnp.var(combined_loss)
 
     loss_var = jnp.var(combined_loss)
@@ -582,7 +568,7 @@ def inner_solver(init_guess, log_z_list):
 def ofer(opt_params):
     log_z_list = get_log_z_all(opt_params)
     tot_conc = init_conc
-    struc_concs_guess = jnp.full(12, jnp.log(0.001 / 12))
+    struc_concs_guess = jnp.full(2, jnp.log(0.001 / 2))
     fin_log_concs = inner_solver(struc_concs_guess, log_z_list)
     fin_concs = jnp.exp(fin_log_concs)
     yields = fin_concs / jnp.sum(fin_concs)
@@ -592,15 +578,14 @@ def ofer(opt_params):
 
 def ofer_grad_fn(opt_params, desired_yield_val):
     target_yield = ofer(opt_params)
-    loss = jnp.linalg.norm(desired_yield_val - jnp.exp(target_yield))
+    loss = (desired_yield_val - jnp.exp(target_yield)) ** 2
     return loss
 
 
 num_params = len(init_params)
 mask = jnp.zeros(num_params)
-# mask = mask.at[0].set(1.0)
+#mask = mask.at[0].set(1.0)
 mask = mask.at[-1].set(1.0)
-
 
 def masked_grads(grads):
     return grads * mask
@@ -622,12 +607,14 @@ param_names += [f"rep_alpha"]
 param_names += [f"kbT"]
 
 
-desired_yields_range = jnp.array([0.9, 1.0])
+
+desired_yields_range = jnp.array([0.5])
+
 
 
 os.makedirs("Temp", exist_ok=True)
 
-with open("Temp/temp_12.txt", "w") as f:
+with open("Temp/restricted.txt", "w") as f:
     for des_yield in desired_yields_range:
 
         for i in tqdm(range(n_outer_iters)):
@@ -636,7 +623,7 @@ with open("Temp/temp_12.txt", "w") as f:
             grads = masked_grads(grads)
             updates, opt_state = outer_optimizer.update(grads, opt_state)
             params = optax.apply_updates(params, updates)
-            # params = project(params)
+            #params = project(params)
             print("Updated Parameters:")
             for name, value in {
                 name: params[idx] for idx, name in enumerate(param_names)
@@ -652,8 +639,13 @@ with open("Temp/temp_12.txt", "w") as f:
         final_target_yields = jnp.exp(fin_yield)
 
         f.write(f"{des_yield},{final_target_yields},{params[-1]}\n")
-        # f.write(f"{des_yield}, {final_target_yields}, {params[0]}, {params[-1]}\n")
-        f.flush()
+        #f.write(f"{des_yield}, {final_target_yields}, {params[0]}, {params[-1]}\n")
+        f.flush() 
 
 
 print("All results saved.")
+
+
+
+
+

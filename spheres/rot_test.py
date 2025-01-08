@@ -34,6 +34,9 @@ import numpy as np
 import jax.numpy as jnp
 import unittest
 from scipy.spatial import distance_matrix
+import matplotlib.pyplot as plt
+import statsmodels
+import statsmodels.api as sm
 
 euler_scheme = "sxyz"
 V = 54000.0
@@ -42,7 +45,7 @@ SEED = 42
 main_key = random.PRNGKey(SEED)
 
 init_params = jnp.array(
-    [1.0, 2.5, 1e-12, 1.0, 1.0]
+    [2.0, 2.5, 5.0, 1.0, 1.0]
 )  # morse_eps, morse_alpha, rep_A, rep_alpha, kbT
 displacement_fn, shift_fn = space.free()
 
@@ -221,7 +224,7 @@ def generate_connected_subsets_rb(vertex_coords, adj_matrix):
 vertex_species = 0
 n_species = 2
 vertex_radius = 2.0
-small_value = 1e-12
+small_value = 1e-14
 
 rep_rmax_table = jnp.full((n_species, n_species), 2 * vertex_radius)
 
@@ -323,7 +326,7 @@ def hess(energy_fn, q, pos, species, opt_params):
 def compute_zvib(energy_fn, q, pos, species, opt_params):
     evals, _ = hess(energy_fn, q, pos, species, opt_params)
     zvib = jnp.prod(
-        jnp.sqrt(2.0 * jnp.pi / ((opt_params[4]) * (jnp.abs(evals[6:]) + 1e-12)))
+        jnp.sqrt(2.0 * jnp.pi / ((1 / opt_params[4]) * (jnp.abs(evals[6:]) + 1e-12)))
     )
     return zvib
 
@@ -353,307 +356,83 @@ def compute_zrot_mod_sigma(energy_fn, q, pos, species, opt_params, key, nrandom=
     return Jtilde, Js, key
 
 
-def compute_zc(boltzmann_weight, z_rot_mod_sigma, z_vib, sigma, V=V):
-    z_trans = V
-    z_rot = z_rot_mod_sigma / sigma
-    return boltzmann_weight * z_trans * z_rot * z_vib
-
-
-def load_sigmas(file_path):
-    sigmas = {}
-    with open(file_path, "r") as file:
-        next(file)  # Skip the header line
-        for line in file:
-            try:
-                shell, sigma = line.strip().split(",")
-                size = int(shell.split("_")[1].split(".")[0])
-                sigmas[size] = int(sigma)
-            except (IndexError, ValueError) as e:
-                print(f"Error parsing line: {line.strip()} - {e}")
-    return sigmas
-
-
-def adjust_sigmas(sigmas):
-    adjusted_sigmas = {}
-    for size, sigma in sigmas.items():
-        if size > 1:
-            adjusted_sigmas[size] = sigma * (5**size)
-        else:
-            adjusted_sigmas[size] = 1
-    return adjusted_sigmas
-
-
-def compute_zc(boltzmann_weight, z_rot_mod_sigma, z_vib, sigma, V=V):
-    z_trans = V
-    z_rot = z_rot_mod_sigma / sigma
-    return boltzmann_weight * z_trans * z_rot * z_vib
-
-
-sigmas_ext = load_sigmas("symmetry_numbers.txt")
-sigmas = adjust_sigmas(sigmas_ext)
+def remove_outliers(Js):
+    # Convert Js to a numpy array for statsmodels
+    Js_np = np.array(Js)
+    # Perform outlier test
+    test = sm.OLS(Js_np, sm.add_constant(np.arange(len(Js_np)))).fit()
+    test_outliers = test.outlier_test()
+    # Identify non-outliers
+    non_outliers = test_outliers['bonf(p)'] > 0.05
+    # Return cleaned Js
+    return Js_np[non_outliers]
 
 
 full_shell_coord = load_rb_orientation_vec(file_paths)[0]
-# print(full_shell_coord)
-# print(full_shell_coord.shape)
 adj_ma = are_blocks_connected_rb(full_shell_coord)
 rbs = generate_connected_subsets_rb(full_shell_coord, adj_ma)
 rbs = [rb.flatten() for rb in rbs]
 shapes_species = [get_icos_shape_and_species(size) for size in range(1, 13)]
 shapes, species = zip(*shapes_species)
 
-
-"""
-import os
-
-# Create the directory if it doesn't exist
-output_dir = "pos_files"
-os.makedirs(output_dir, exist_ok=True)
-
-for inx in range(12):
-    pos72 = utils.get_positions(rbs[inx], shapes_species[inx][0])
-    vertex_radius = 2.0
-
-    box_size = 30.0
-    patch_radius = 0.01
-    vertex_color = "43a5be"
-    patch_color = "4fb06d"
-    body_pos = pos72.reshape(-1, 3)
-    assert len(body_pos.shape) == 2
-    assert body_pos.shape[0] % 6 == 0
-    n_vertices = body_pos.shape[0] // 6
-    if n_vertices != 12:
-        print(f"WARNING: writing shell body with only {n_vertices} vertices")
-    assert body_pos.shape[1] == 3
-
-    box_def = f"boxMatrix {box_size} 0 0 0 {box_size} 0 0 0 {box_size}"
-    vertex_def = f'def V "sphere {vertex_radius*2} {vertex_color}"'
-    patch_def = f'def P "sphere {patch_radius*2} {patch_color}"'
-
-    position_lines = list()
-    for num_vertex in range(n_vertices):
-        vertex_start_idx = num_vertex * 6
-
-        # vertex center
-        vertex_center_pos = body_pos[vertex_start_idx]
-        vertex_line = (
-            f"V {vertex_center_pos[0]} {vertex_center_pos[1]} {vertex_center_pos[2]}"
-        )
-        position_lines.append(vertex_line)
-
-        for num_patch in range(5):
-            patch_pos = body_pos[vertex_start_idx + num_patch + 1]
-            patch_line = f"P {patch_pos[0]} {patch_pos[1]} {patch_pos[2]}"
-            position_lines.append(patch_line)
-
-    all_lines = [box_def, vertex_def, patch_def] + position_lines + ["eof"]
-    
-    # Write to a new .pos file for each index
-    output_file = os.path.join(output_dir, f"shell_{inx}.pos")
-    with open(output_file, "w+") as of:
-        of.write("\n".join(all_lines))
-
-pdb.set_trace()
-"""
-energy_fns = {size: jit(get_nmer_energy_fn(size)) for size in range(2, 12 + 1)}
-
-mon_energy_fn = lambda q, pos, species, opt_params: 0.0
-
-
-zrot_mod_sigma_1, _, main_key = compute_zrot_mod_sigma(
-    mon_energy_fn, rbs[0], shapes[0], species[0], init_params, main_key
-)
-zvib_1 = 1.0
-boltzmann_weight = 1.0
-
-z_1 = jnp.array([compute_zc(boltzmann_weight, zrot_mod_sigma_1, zvib_1, sigmas[1])])
-log_z_1 = jnp.log(z_1)
-
-zrot_mod_sigma_values = []
-
-for size in range(2, 12 + 1):
-    zrot_mod_sigma, Js, main_key = compute_zrot_mod_sigma(
-        energy_fns[size],
-        rbs[size - 1],
-        shapes[size - 1],
-        species[size - 1],
-        init_params,
-        main_key,
-    )
-    zrot_mod_sigma_values.append(zrot_mod_sigma)
-
-
-def get_log_z_all(opt_params):
-    def compute_log_z(size):
-        energy_fn = energy_fns[size]
-        # pdb.set_trace()
-        shape = shapes[size - 1]
-        # print(f"shape: {shape}")
-        rb = rbs[size - 1]
-        # print(f"rb: {rb}")
-        specie = species[size - 1]
-        sigma = sigmas[size]
-        zrot_mod_sigma = zrot_mod_sigma_values[size - 2]
-        zvib = compute_zvib(energy_fn, rb, shape, specie, opt_params)
-        e0 = energy_fn(rb, shape, species, opt_params)
-        boltzmann_weight = jnp.exp(-e0 / opt_params[4])
-        z = compute_zc(boltzmann_weight, zrot_mod_sigma, zvib, sigma)
-        log_z = jnp.log(z)
-
-        return log_z
-
-    log_z_struc = []
-
-    for size in range(2, 12 + 1):
-        log_z = compute_log_z(size)
-        log_z_struc.append(log_z)
-
-    log_z_struc = jnp.array(log_z_struc)
-
-    log_z_all = jnp.concatenate([log_z_1, log_z_struc], axis=0)
-    # print(f"log_z_all: {log_z_all}")
-
-    return log_z_all
-
-
-nper_structure = jnp.arange(1, 13)
-init_conc = jnp.array([0.001])
-
-
-def loss_fn(log_concs_struc, log_z_list):
-    tot_conc = init_conc
-    log_mon_conc = jnp.log(tot_conc)
-
-    mon_val = jnp.log(jnp.dot(nper_structure, jnp.exp(log_concs_struc)))
-    mon_loss = jnp.sqrt((mon_val - log_mon_conc) ** 2).squeeze()
-
-    def struc_loss_fn(struc_idx):
-        log_vcs = jnp.log(V) + log_concs_struc[struc_idx]
-
-        n_sa = nper_structure[struc_idx]
-        log_vca = jnp.log(V) + log_concs_struc[struc_idx]
-        vcs_denom = n_sa * log_vca
-        log_zs = log_z_list[struc_idx]
-
-        log_zalpha = log_z_list[struc_idx]
-        z_denom = n_sa * log_zalpha
-
-        # Compute loss
-        loss = jnp.sqrt((log_vcs - vcs_denom - log_zs + z_denom) ** 2)
-
-        return loss
-
-    struc_loss = vmap(struc_loss_fn)(jnp.arange(1, 12))
-    combined_loss = jnp.concatenate(
-        [jnp.array([mon_loss]), struc_loss]
-    )  # Add mon_loss to combined_loss as a 1D array
-    loss_var = jnp.var(combined_loss)
-
-    loss_var = jnp.var(combined_loss)
-    # loss_max = jnp.max(combined_loss)
-
-    tot_loss = jnp.linalg.norm(combined_loss) + loss_var
-    return tot_loss, combined_loss, loss_var
-
-
-def optimality_fn(log_concs_struc, log_z_list):
-    return grad(
-        lambda log_concs_struc, log_z_list: loss_fn(log_concs_struc, log_z_list)[0]
-    )(log_concs_struc, log_z_list)
-
-
-@implicit_diff.custom_root(optimality_fn)
-def inner_solver(init_guess, log_z_list):
-    gd = GradientDescent(
-        fun=lambda log_concs_struc, log_z_list: loss_fn(log_concs_struc, log_z_list)[0],
-        maxiter=80000,
-        implicit_diff=True,
-    )
-    sol = gd.run(init_guess, log_z_list)
-
-    final_params = sol.params
-    final_loss, combined_losses, _ = loss_fn(final_params, log_z_list)
-    max_loss = jnp.max(combined_losses)
-    second_max_loss = jnp.partition(combined_losses, -2)[-2]
-
-    return final_params
-
-
-def ofer(opt_params):
-    log_z_list = get_log_z_all(opt_params)
-    tot_conc = init_conc
-    struc_concs_guess = jnp.full(12, jnp.log(0.001 / 12))
-    fin_log_concs = inner_solver(struc_concs_guess, log_z_list)
-    fin_concs = jnp.exp(fin_log_concs)
-    yields = fin_concs / jnp.sum(fin_concs)
-    target_yield = jnp.log(yields[-1])
-    return target_yield
-
-
-def ofer_grad_fn(opt_params, desired_yield_val):
-    target_yield = ofer(opt_params)
-    loss = jnp.linalg.norm(desired_yield_val - jnp.exp(target_yield))
-    return loss
-
-
-num_params = len(init_params)
-mask = jnp.zeros(num_params)
-# mask = mask.at[0].set(1.0)
-mask = mask.at[-1].set(1.0)
-
-
-def masked_grads(grads):
-    return grads * mask
-
-
-our_grad_fn = jit(value_and_grad(ofer_grad_fn, has_aux=False))
-params = init_params
-outer_optimizer = optax.adam(1e-2)
-opt_state = outer_optimizer.init(params)
-
-n_outer_iters = 200
-outer_losses = []
-
-
-param_names = [f"morse_eps"]
-param_names += [f"morse_alpha"]
-param_names += [f"rep_A"]
-param_names += [f"rep_alpha"]
-param_names += [f"kbT"]
-
-
-desired_yields_range = jnp.array([0.9, 1.0])
-
-
-os.makedirs("Temp", exist_ok=True)
-
-with open("Temp/temp_12.txt", "w") as f:
-    for des_yield in desired_yields_range:
-
-        for i in tqdm(range(n_outer_iters)):
-            loss, grads = our_grad_fn(params, des_yield)
-            # outer_losses.append(loss)
-            grads = masked_grads(grads)
-            updates, opt_state = outer_optimizer.update(grads, opt_state)
-            params = optax.apply_updates(params, updates)
-            # params = project(params)
-            print("Updated Parameters:")
-            for name, value in {
-                name: params[idx] for idx, name in enumerate(param_names)
-            }.items():
-                print(f"{name}: {value}")
-            print(params)
-            fin_yield = ofer(params)
-            fin_yield = jnp.exp(fin_yield)
-            print(f"Desired Yield: {des_yield}, Yield: {fin_yield}")
-
-        final_params = params
-        fin_yield = ofer(params)
-        final_target_yields = jnp.exp(fin_yield)
-
-        f.write(f"{des_yield},{final_target_yields},{params[-1]}\n")
-        # f.write(f"{des_yield}, {final_target_yields}, {params[0]}, {params[-1]}\n")
-        f.flush()
-
-
-print("All results saved.")
+nrandom = 45000
+key = random.PRNGKey(0)
+energy_fn = get_nmer_energy_fn(10)
+q = rbs[9]
+pos = shapes[9]
+species = species[9]
+opt_params = init_params
+
+Jtilde, Js, key = compute_zrot_mod_sigma(energy_fn, q, pos, species, opt_params, key, nrandom)
+
+# Optional: Uncomment to use outlier removal
+# Js_clean = remove_outliers(Js)
+# if len(Js_clean) == 0:
+#     print(f"No non-outlier values for nrandom = {nrandom}")
+#     exit()
+
+# Directly calculate mean from `Js` (or `Js_clean` if using outlier removal)
+Jmean = float(jnp.mean(Js))  # Ensure Jmean is a scalar
+
+# Determine bins for histogram
+max_js = int(jnp.max(Js)) + 500  # Adjust range dynamically
+bins = list(range(0, max_js, 500))
+
+# Plot histogram
+plt.hist(Js, bins=bins, alpha=0.75)
+nrandom = 45000
+key = random.PRNGKey(0)
+energy_fn = get_nmer_energy_fn(10)
+q = rbs[9]
+pos = shapes[9]
+species = species[9]
+opt_params = init_params
+
+Jtilde, Js, key = compute_zrot_mod_sigma(energy_fn, q, pos, species, opt_params, key, nrandom)
+
+# Optional: Uncomment to use outlier removal
+# Js_clean = remove_outliers(Js)
+# if len(Js_clean) == 0:
+#     print(f"No non-outlier values for nrandom = {nrandom}")
+#     exit()
+
+# Directly calculate mean from `Js` (or `Js_clean` if using outlier removal)
+Jmean = float(jnp.mean(Js))  # Ensure Jmean is a scalar
+
+
+print(f"Max value in Js: {jnp.max(Js)}")
+print(f"Min value in Js: {jnp.min(Js)}")
+
+# Cap the maximum value dynamically
+MAX_ALLOWED_BIN = 10_000  # Prevent range overflow with an upper limit
+max_js = int(min(jnp.max(Js) + 500, MAX_ALLOWED_BIN))  # Apply cap here
+
+if max_js > 0:  # Ensure max_js is valid
+    bins = list(range(0, max_js, 500))
+    plt.hist(Js, bins=bins, alpha=0.75)
+    plt.xlabel("Values of Js")
+    plt.ylabel("Frequency")
+    plt.title("Histogram of Js Values")
+    plt.show()
+else:
+    print("Invalid range for histogram bins. Skipping plot.")
