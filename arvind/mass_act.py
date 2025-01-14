@@ -169,7 +169,7 @@ init_conc = args.init_conc
 m_conc = init_conc / n
 init_concs = jnp.full(n, m_conc)
 # init_params = jnp.concatenate([patchy_vals, init_concs])
-#init_params = patchy_vals
+# init_params = patchy_vals
 weak_eps = jnp.array([args.eps_weak])
 init_params = jnp.concatenate([patchy_vals, weak_eps])
 
@@ -273,7 +273,7 @@ generated_idx_pairs = generate_idx_pairs(n_species)
 
 
 def make_tables(opt_params, use_custom_pairs=True, custom_pairs=custom_pairs):
-    #morse_eps_table = jnp.full((n_species, n_species), args.eps_weak)
+    # morse_eps_table = jnp.full((n_species, n_species), args.eps_weak)
     morse_eps_table = jnp.full((n_species, n_species), opt_params[-1])
     morse_eps_table = morse_eps_table.at[0, :].set(small_value)
     morse_eps_table = morse_eps_table.at[:, 0].set(small_value)
@@ -620,9 +620,9 @@ def inner_solver(init_guess, log_z_list, opt_params):
 def return_both_yields(func):
     @wraps(func)
     def wrapper(*args, return_both=False, **kwargs):
-        target_yield, mon_yield_tot = func(*args, **kwargs)
+        target_yield, mon_yield_tot, tots = func(*args, **kwargs)
         if return_both:
-            return target_yield, mon_yield_tot
+            return target_yield, mon_yield_tot, tots
         return target_yield
 
     return wrapper
@@ -640,24 +640,32 @@ def ofer(opt_params):
     yields = fin_concs / jnp.sum(fin_concs)
     target_yield = safe_log(yields[target_idx])
     mon_yield_tot = jnp.sum(yields[:n])
-    return target_yield, jnp.sum(fin_concs)  # mon_yield_tot
+    # return target_yield, jnp.sum(fin_concs)  # mon_yield_tot
+    # return target_yield, mon_yield_tot
+    return target_yield, fin_concs[:n].sum(), fin_concs.sum()
 
 
 def ofer_grad_fn(opt_params, desired_yield_val):
-    target_yield, tot_mon_yield = ofer(opt_params, return_both=True)
+    target_yield, tot_mon_yield, fin_conc = ofer(opt_params, return_both=True)
 
     # e_plus_1 = (e_plus_1_fn(rb_plus_1, shape_plus_1, jnp.tile(jnp.array([1, 0, 2]), n + 1), opt_params) - 1) / n - 1
     # e_plus_2 = (e_plus_2_fn(rb_plus_2, shape_plus_2, jnp.tile(jnp.array([1, 0, 2]),n + 2), opt_params) - 1)/(n+1) - 1
     # """
     e_plus_1 = (
         e_plus_1_fn(
-            rb_plus_1, shape_plus_1, jnp.array([1, 0, 2, 3, 0, 4, 5, 0, 6, 5, 0, 6]), opt_params
+            rb_plus_1,
+            shape_plus_1,
+            jnp.array([1, 0, 2, 3, 0, 4, 5, 0, 6, 5, 0, 6]),
+            opt_params,
         )
         - (n + 1)
     ) / (n + 1)
     e_plus_2 = (
         e_plus_2_fn(
-            rb_plus_2, shape_plus_2, jnp.array([1, 0, 2, 3, 0, 4, 5, 0, 6, 1, 0, 2, 3, 0, 4]), opt_params
+            rb_plus_2,
+            shape_plus_2,
+            jnp.array([1, 0, 2, 3, 0, 4, 5, 0, 6, 1, 0, 2, 3, 0, 4]),
+            opt_params,
         )
         - (n + 2)
     ) / (n + 2)
@@ -669,29 +677,17 @@ def ofer_grad_fn(opt_params, desired_yield_val):
         n + 2
     )
 
-    mass_act_loss = mass_act_loss1 + mass_act_loss2
+    mass_act_loss_val = mass_act_loss1 * (n + 1) + mass_act_loss2 * (n + 2)
+    mass_act_loss = jnp.sqrt((fin_conc - mass_act_loss_val) ** 2)
+
     # """
     # loss = jnp.linalg.norm(desired_yield_val - jnp.exp(target_yield))
     loss = (
         jnp.linalg.norm(desired_yield_val - jnp.exp(target_yield))
-        + 2 * mass_act_loss / 1e+18
+        + mass_act_loss  # / 1e10
     )
 
     return loss, mass_act_loss
-
-
-"""
-def ofer_grad_max(opt_params):
-    target_yield = ofer(opt_params)
-    loss = - target_yield
-    return loss
-
-
-def project(params):
-    conc_min = 1e-6
-    concs = jnp.clip(params[-n:], a_min=conc_min)
-    return jnp.concatenate([params[:-n], concs])
-"""
 
 
 def abs_array(par):
@@ -723,13 +719,11 @@ def masked_grads(grads):
 
 
 our_grad_fn = jit(value_and_grad(ofer_grad_fn, has_aux=True))
-# our_grad_fn = value_and_grad(ofer_grad_fn, has_aux=False)
-# our_grad_max = jit(value_and_grad(ofer_grad_max, has_aux=False))
 params = init_params
-outer_optimizer = optax.adam(1e-2)
+outer_optimizer = optax.adam(1e-1)
 opt_state = outer_optimizer.init(params)
 
-n_outer_iters = 600
+n_outer_iters = 200
 outer_losses = []
 
 
@@ -755,13 +749,6 @@ with open("mass_law/output_file", "w") as f:
         print(f"Mass action loss: {mass_act_loss}")
         print(f"Gradients: {grads}")
 
-        """
-        # Check for NaNs in gradients
-        if jnp.isnan(grads).any():
-            print("NaNs detected in gradients. Stopping optimization.")
-            break
-        """
-
         # grads = masked_grads(grads)
         updates, opt_state = outer_optimizer.update(grads, opt_state)
         params = optax.apply_updates(params, updates)
@@ -780,5 +767,7 @@ with open("mass_law/output_file", "w") as f:
     fin_yield = ofer(params)
     final_target_yields = jnp.exp(fin_yield)
 
-    f.write(f"{args.desired_yield},{final_target_yields},{params[0]},{params[1]},{params[-1]}\n")
+    f.write(
+        f"{args.desired_yield},{final_target_yields},{params[0]},{params[1]},{params[-1]}\n"
+    )
     f.flush()
