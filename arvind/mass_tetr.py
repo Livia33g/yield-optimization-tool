@@ -579,8 +579,9 @@ def loss_fn(log_concs_struc, log_z_list, opt_params):
 
         return mass_act_loss
 
-    mon_loss = vmap(mon_loss_fn)(jnp.arange(num_monomers))
-    struc_loss = vmap(struc_loss_fn)(jnp.arange(num_monomers, tot_num_structures))
+    mon_loss = jnp.sqrt((vmap(mon_loss_fn)(jnp.arange(num_monomers)))**2)
+    struc_loss = jnp.sqrt((vmap(struc_loss_fn)(jnp.arange(num_monomers, tot_num_structures)))**2)
+    """
     mass_act_loss_fun = vmap(get_mass_act_loss, in_axes=(None, 0))
     mass_act_loss = jnp.sqrt(
         (
@@ -591,12 +592,14 @@ def loss_fn(log_concs_struc, log_z_list, opt_params):
         ** 2
     )
     mass_act_loss_log = jnp.array([jnp.log(mass_act_loss)])
+    """
 
-    combined_loss = jnp.concatenate([mon_loss, struc_loss, mass_act_loss_log])
-    loss_var = jnp.var(combined_loss)
-    loss_max = jnp.max(combined_loss)
+    loss_var = jnp.var(jnp.concatenate([mon_loss, struc_loss]))
+    #combined_loss = jnp.concatenate([mon_loss, struc_loss, mass_act_loss_log])
+    combined_loss = jnp.concatenate([mon_loss, struc_loss])
 
-    tot_loss = jnp.linalg.norm(combined_loss) + loss_var
+    tot_loss = jnp.sum(combined_loss) + loss_var
+    #tot_loss = 50 * jnp.sum(combined_loss) + loss_var + jnp.log(mass_act_loss)
     return tot_loss, combined_loss, loss_var
 
 
@@ -677,15 +680,16 @@ def ofer_grad_fn(opt_params, desired_yield_val):
 
         return mass_act_loss
 
-    mass_act_loss_fun = vmap(get_mass_act_loss, in_axes=(None, 0))
-    # mass_act_loss = jnp.sqrt((init_conc-fin_conc+jnp.sum(mass_act_loss_fun(opt_params, species_tetr)))**2)
+    mapped_mass_act_loss = vmap(get_mass_act_loss, in_axes=(None, 0))(opt_params, species_tetr)
 
-    mass_act_loss = jnp.sum(mass_act_loss_fun(opt_params, species_tetr))
+    # Then compute the log
+    mass_act_loss = jnp.log(jnp.sum(mapped_mass_act_loss))
 
-    # loss = jnp.linalg.norm(desired_yield_val - jnp.exp(target_yield))
-    loss = -target_yield
 
-    return loss, mass_act_loss
+    loss = 10 * jnp.linalg.norm(desired_yield_val - jnp.exp(target_yield)) + mass_act_loss
+    #loss = -target_yield
+
+    return loss, jnp.exp(mass_act_loss)
 
 
 def abs_array(par):
@@ -769,3 +773,4 @@ with open("mass_law/output_file", "w") as f:
         f"{args.desired_yield},{final_target_yields},{params[0]},{params[1]},{params[-1]}\n"
     )
     f.flush()
+
