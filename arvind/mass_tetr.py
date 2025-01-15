@@ -55,11 +55,11 @@ parser.add_argument(
 parser.add_argument(
     "--init_conc",
     type=float,
-    default=0.001,
+    default=0.008,
     help="Initial concentration. Default is 0.001.",
 )
 parser.add_argument(
-    "--desired_yield", type=float, default=0.4, help="desired yield of target."
+    "--desired_yield", type=float, default=0.2, help="desired yield of target."
 )
 parser.add_argument(
     "--output", type=str, default="weak_7.txt", help="Output file to save the results."
@@ -537,6 +537,16 @@ for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
 nper_structure = jnp.array(monomer_counts)
 species_tetr = data_tetr[f"4_pc_species"]
 
+tetramer_counts = {
+    key.split("_")[0]: data_tetr[key]
+    for key in data_tetr.keys()
+    if key.endswith("_4_counts")
+}
+
+tetramer_counts_array = jnp.array(list(tetramer_counts.values()))
+#tetramer_counts_array = jnp.array([tetramer_counts[key] for key in sorted(tetramer_counts.keys())])
+
+
 
 def loss_fn(log_concs_struc, log_z_list, opt_params):
     m_conc = init_concs  # opt_params[-n:] init_concs
@@ -568,38 +578,37 @@ def loss_fn(log_concs_struc, log_z_list, opt_params):
 
     final_mon_conc = jnp.exp(log_concs_struc[:n]).sum()
 
-    def get_mass_act_loss(opt_params, species):
+    def log_massact_loss_fn(opt_params, struc_idx):
 
-        e_plus_1 = (
-            e_plus_1_fn(rb_plus_1, shape_plus_1, species, opt_params) - (n + 1)
-        ) / (n + 1)
-        mass_act_loss = (n + 1) * ((final_mon_conc * jnp.exp(-1 / kT * e_plus_1))) ** (
-            n + 1
-        )
+        def mon_sum(mon_idx):
+
+            conc_mon_cont = tetramer_counts_array[mon_idx, struc_idx]*log_concs_struc[mon_idx]
+        
+            return conc_mon_cont
+
+        e_plus_1 = e_plus_1_fn(rb_plus_1, shape_plus_1, species_tetr[struc_idx], opt_params) 
+
+        presum_mon = vmap(mon_sum)(jnp.arange(n))
+             
+        mass_act_loss = -1 / kT * e_plus_1 + jnp.sum(presum_mon) + jnp.log(n+1)
 
         return mass_act_loss
 
-    mon_loss = jnp.sqrt((vmap(mon_loss_fn)(jnp.arange(num_monomers)))**2)
-    struc_loss = jnp.sqrt((vmap(struc_loss_fn)(jnp.arange(num_monomers, tot_num_structures)))**2)
+    mon_loss = vmap(mon_loss_fn)(jnp.arange(num_monomers))
+    struc_loss = vmap(struc_loss_fn)(jnp.arange(num_monomers, tot_num_structures))
     """
-    mass_act_loss_fun = vmap(get_mass_act_loss, in_axes=(None, 0))
-    mass_act_loss = jnp.sqrt(
-        (
-            init_conc
-            - jnp.exp(log_concs_struc).sum()
-            + jnp.sum(mass_act_loss_fun(opt_params, species_tetr))
-        )
-        ** 2
-    )
-    mass_act_loss_log = jnp.array([jnp.log(mass_act_loss)])
-    """
+    mass_act_loss_fun = vmap(log_massact_loss_fn, in_axes=(None, 0))
+    mass_act_loss = jnp.sum(mass_act_loss_fun(opt_params, jnp.arange(species_tetr.shape[0])))
 
+    mass_act_loss_log = jnp.array([ mass_act_loss])
+    """
     loss_var = jnp.var(jnp.concatenate([mon_loss, struc_loss]))
-    #combined_loss = jnp.concatenate([mon_loss, struc_loss, mass_act_loss_log])
-    combined_loss = jnp.concatenate([mon_loss, struc_loss])
+    #combined_losses = jnp.concatenate([mon_loss, struc_loss, mass_act_loss_log])
+    combined_losses = jnp.concatenate([mon_loss, struc_loss])
+    combined_loss = jnp.sum(combined_losses)
 
-    tot_loss = jnp.sum(combined_loss) + loss_var
-    #tot_loss = 50 * jnp.sum(combined_loss) + loss_var + jnp.log(mass_act_loss)
+    tot_loss = combined_loss + loss_var
+
     return tot_loss, combined_loss, loss_var
 
 
@@ -626,8 +635,6 @@ def inner_solver(init_guess, log_z_list, opt_params):
     final_loss, combined_losses, loss_var = loss_fn(
         final_params, log_z_list, opt_params
     )
-    max_loss = jnp.max(combined_losses)
-    second_max_loss = jnp.partition(combined_losses, -2)[-2]
 
     return final_params
 
@@ -654,42 +661,46 @@ def ofer(opt_params):
         tot_num_structures, safe_log(tot_conc / tot_num_structures)
     )
     fin_log_concs = inner_solver(struc_concs_guess, log_z_list, opt_params)
-    fin_concs = jnp.exp(fin_log_concs)
+    fin_concs = fin_log_concs
     yields = fin_concs / jnp.sum(fin_concs)
     target_yield = safe_log(yields[target_idx])
     mon_yield_tot = jnp.sum(yields[:n])
     # return target_yield, jnp.sum(fin_concs)  # mon_yield_tot
     # return target_yield, mon_yield_tot
-    return target_yield, fin_concs[:n].sum(), fin_concs.sum()
+    return target_yield, fin_concs[:n], fin_concs.sum()
 
 
 def ofer_grad_fn(opt_params, desired_yield_val):
-    target_yield, tot_mon_yield, fin_conc = ofer(opt_params, return_both=True)
+    target_yield, mon_concs, fin_conc = ofer(opt_params, return_both=True)
 
     # e_plus_1 = (e_plus_1_fn(rb_plus_1, shape_plus_1, jnp.tile(jnp.array([1, 0, 2]), n + 1), opt_params) - 1) / n - 1
     # e_plus_2 = (e_plus_2_fn(rb_plus_2, shape_plus_2, jnp.tile(jnp.array([1, 0, 2]),n + 2), opt_params) - 1)/(n+1) - 1
     # """
-    def get_mass_act_loss(opt_params, species):
+    def log_massact_loss_fn(opt_params, struc_idx):
 
-        e_plus_1 = (
-            e_plus_1_fn(rb_plus_1, shape_plus_1, species, opt_params) - (n + 1)
-        ) / (n + 1)
-        mass_act_loss = (n + 1) * ((tot_mon_yield * jnp.exp(-1 / kT * e_plus_1))) ** (
-            n + 1
-        )
+        def mon_sum(mon_idx):
+
+            conc_mon_cont = jnp.sum(tetramer_counts_array[mon_idx, struc_idx] * mon_concs[mon_idx])
+        
+            return conc_mon_cont
+
+        e_plus_1 = e_plus_1_fn(rb_plus_1, shape_plus_1, species_tetr[struc_idx], opt_params) 
+
+        presum_mons = vmap(mon_sum)(jnp.arange(n))
+             
+        mass_act_loss = -1 / kT * e_plus_1 + jnp.sum(presum_mons) + jnp.log(n+1)
 
         return mass_act_loss
 
-    mapped_mass_act_loss = vmap(get_mass_act_loss, in_axes=(None, 0))(opt_params, species_tetr)
+    mass_act_loss_logs = vmap(log_massact_loss_fn, in_axes=(None, 0))
+    # mass_act_loss = jnp.sqrt((init_conc-fin_conc+jnp.sum(mass_act_loss_fun(opt_params, species_tetr)))**2)
 
-    # Then compute the log
-    mass_act_loss = jnp.log(jnp.sum(mapped_mass_act_loss))
+    mass_act_loss = jnp.sum(mass_act_loss_logs(opt_params, jnp.arange(species_tetr.shape[0])))
 
+    # loss = jnp.linalg.norm(desired_yield_val - jnp.exp(target_yield))
+    loss = jnp.linalg.norm(desired_yield_val - jnp.exp(target_yield)) + mass_act_loss
 
-    loss = 10 * jnp.linalg.norm(desired_yield_val - jnp.exp(target_yield)) + mass_act_loss
-    #loss = -target_yield
-
-    return loss, jnp.exp(mass_act_loss)
+    return loss, mass_act_loss
 
 
 def abs_array(par):
@@ -722,7 +733,7 @@ def masked_grads(grads):
 
 our_grad_fn = jit(value_and_grad(ofer_grad_fn, has_aux=True))
 params = init_params
-outer_optimizer = optax.adam(1e-1)
+outer_optimizer = optax.adam(1e-2)
 opt_state = outer_optimizer.init(params)
 
 n_outer_iters = 300
@@ -773,4 +784,6 @@ with open("mass_law/output_file", "w") as f:
         f"{args.desired_yield},{final_target_yields},{params[0]},{params[1]},{params[-1]}\n"
     )
     f.flush()
+
+
 
