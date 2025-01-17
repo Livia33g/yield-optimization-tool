@@ -40,13 +40,13 @@ parser = argparse.ArgumentParser(description="Simulation with adjustable paramet
 parser.add_argument(
     "--eps_weak",
     type=float,
-    default=5.0,
+    default=1.0,
     help="weak epsilon values (attraction strengths).",
 )
 parser.add_argument(
     "--eps_init",
     type=float,
-    default=5.0,
+    default=6.2,
     help="init strong epsilon values (attraction strengths).",
 )
 parser.add_argument(
@@ -59,7 +59,7 @@ parser.add_argument(
     help="Initial concentration. Default is 0.001.",
 )
 parser.add_argument(
-    "--desired_yield", type=float, default=0.2, help="desired yield of target."
+    "--desired_yield", type=float, default=0.4, help="desired yield of target."
 )
 parser.add_argument(
     "--output", type=str, default="weak_7.txt", help="Output file to save the results."
@@ -136,7 +136,6 @@ def indx_of_target(target, species_data):
 
     return None
 
-
 target_idx = indx_of_target(target, species_data)
 
 euler_scheme = "sxyz"
@@ -173,7 +172,7 @@ init_concs = jnp.full(n, m_conc)
 # init_params = jnp.concatenate([patchy_vals, init_concs])
 # init_params = patchy_vals
 weak_eps = jnp.array([args.eps_weak])
-init_params = jnp.concatenate([patchy_vals, weak_eps])
+init_params = jnp.concatenate([patchy_vals, weak_eps, init_concs])
 
 
 def make_shape(size):
@@ -276,7 +275,7 @@ generated_idx_pairs = generate_idx_pairs(n_species)
 
 def make_tables(opt_params, use_custom_pairs=True, custom_pairs=custom_pairs):
     # morse_eps_table = jnp.full((n_species, n_species), args.eps_weak)
-    morse_eps_table = jnp.full((n_species, n_species), opt_params[-1])
+    morse_eps_table = jnp.full((n_species, n_species), opt_params[2])
     morse_eps_table = morse_eps_table.at[0, :].set(small_value)
     morse_eps_table = morse_eps_table.at[:, 0].set(small_value)
 
@@ -549,7 +548,8 @@ tetramer_counts_array = jnp.array(list(tetramer_counts.values()))
 
 
 def loss_fn(log_concs_struc, log_z_list, opt_params):
-    m_conc = init_concs  # opt_params[-n:] init_concs
+    #m_conc = init_concs  # opt_params[-n:] init_concs
+    m_conc = opt_params[-n:]
     log_mon_conc = safe_log(m_conc)
 
     def mon_loss_fn(mon_idx):
@@ -605,7 +605,7 @@ def loss_fn(log_concs_struc, log_z_list, opt_params):
     loss_var = jnp.var(jnp.concatenate([mon_loss, struc_loss]))
     #combined_losses = jnp.concatenate([mon_loss, struc_loss, mass_act_loss_log])
     combined_losses = jnp.concatenate([mon_loss, struc_loss])
-    combined_loss = jnp.sum(combined_losses)
+    combined_loss = jnp.linalg.norm(combined_losses)
 
     tot_loss = combined_loss + loss_var
 
@@ -613,35 +613,23 @@ def loss_fn(log_concs_struc, log_z_list, opt_params):
 
 
 def optimality_fn(log_concs_struc, log_z_list, opt_params):
-    return grad(
-        lambda log_concs_struc, log_z_list, opt_params: loss_fn(
-            log_concs_struc, log_z_list, opt_params
-        )[0]
-    )(log_concs_struc, log_z_list, opt_params)
+    return grad(lambda log_concs_struc, log_z_list, opt_params: loss_fn(log_concs_struc, log_z_list, opt_params)[0])(log_concs_struc, log_z_list, opt_params)
 
 
 @implicit_diff.custom_root(optimality_fn)
 def inner_solver(init_guess, log_z_list, opt_params):
-    gd = GradientDescent(
-        fun=lambda log_concs_struc, log_z_list, opt_params: loss_fn(
-            log_concs_struc, log_z_list, opt_params
-        )[0],
-        maxiter=50000,
-        implicit_diff=True,
-    )
+    gd = GradientDescent(fun=lambda log_concs_struc, log_z_list, opt_params: loss_fn(log_concs_struc, log_z_list, opt_params)[0], maxiter=50000, implicit_diff=True)
     sol = gd.run(init_guess, log_z_list, opt_params)
-
+    
     final_params = sol.params
-    final_loss, combined_losses, loss_var = loss_fn(
-        final_params, log_z_list, opt_params
-    )
-
+    final_loss, combined_losses, loss_var = loss_fn(final_params, log_z_list, opt_params)
+ 
+    
     return final_params
-
 
 #########################
 
-
+"""
 def return_both_yields(func):
     @wraps(func)
     def wrapper(*args, return_both=False, **kwargs):
@@ -656,22 +644,37 @@ def return_both_yields(func):
 @return_both_yields
 def ofer(opt_params):
     log_z_list = get_log_z_all(opt_params)
-    tot_conc = init_conc
+    tot_conc = opt_params[-n:].sum()
     struc_concs_guess = jnp.full(
         tot_num_structures, safe_log(tot_conc / tot_num_structures)
     )
     fin_log_concs = inner_solver(struc_concs_guess, log_z_list, opt_params)
-    fin_concs = fin_log_concs
+    fin_concs = jnp.exp(fin_log_concs)
     yields = fin_concs / jnp.sum(fin_concs)
     target_yield = safe_log(yields[target_idx])
     mon_yield_tot = jnp.sum(yields[:n])
     # return target_yield, jnp.sum(fin_concs)  # mon_yield_tot
     # return target_yield, mon_yield_tot
     return target_yield, fin_concs[:n], fin_concs.sum()
+"""
+def safe_exp(x, lower_bound=-709.0, upper_bound=709.0):
 
+    clipped_x = jnp.clip(x, a_min=lower_bound, a_max=upper_bound)
+
+    return jnp.exp(clipped_x)
+
+def ofer(opt_params):
+    log_z_list = get_log_z_all(opt_params[:n])
+    tot_conc = init_conc
+    struc_concs_guess = jnp.full(tot_num_structures, safe_log(tot_conc / tot_num_structures))
+    fin_log_concs = inner_solver(struc_concs_guess, log_z_list, opt_params)
+    fin_concs = jnp.exp(fin_log_concs)
+    yields = fin_concs / jnp.sum(fin_concs)
+    target_yield = safe_log(yields[target_idx])
+    return target_yield, fin_concs[:n], fin_concs.sum()
 
 def ofer_grad_fn(opt_params, desired_yield_val):
-    target_yield, mon_concs, fin_conc = ofer(opt_params, return_both=True)
+    target_yield, mon_concs, fin_conc = ofer(opt_params)
 
     # e_plus_1 = (e_plus_1_fn(rb_plus_1, shape_plus_1, jnp.tile(jnp.array([1, 0, 2]), n + 1), opt_params) - 1) / n - 1
     # e_plus_2 = (e_plus_2_fn(rb_plus_2, shape_plus_2, jnp.tile(jnp.array([1, 0, 2]),n + 2), opt_params) - 1)/(n+1) - 1
@@ -680,7 +683,7 @@ def ofer_grad_fn(opt_params, desired_yield_val):
 
         def mon_sum(mon_idx):
 
-            conc_mon_cont = jnp.sum(tetramer_counts_array[mon_idx, struc_idx] * mon_concs[mon_idx])
+            conc_mon_cont = jnp.sum(tetramer_counts_array[mon_idx, struc_idx] * safe_log(mon_concs[mon_idx]))
         
             return conc_mon_cont
 
@@ -698,9 +701,11 @@ def ofer_grad_fn(opt_params, desired_yield_val):
     mass_act_loss = jnp.sum(mass_act_loss_logs(opt_params, jnp.arange(species_tetr.shape[0])))
 
     # loss = jnp.linalg.norm(desired_yield_val - jnp.exp(target_yield))
-    loss = jnp.linalg.norm(desired_yield_val - jnp.exp(target_yield)) + mass_act_loss
+    loss = 10000 * (abs(jnp.log(desired_yield_val)- target_yield))**2 + mass_act_loss
+    
+    #loss = (abs(jnp.log(desired_yield_val)- target_yield))**2
 
-    return loss, mass_act_loss
+    return loss, safe_exp(mass_act_loss)
 
 
 def abs_array(par):
@@ -730,13 +735,18 @@ mask = mask.at[:-n].set(1.0)
 def masked_grads(grads):
     return grads * mask
 
+def project(params):
+    conc_min = 1e-6
+    concs = jnp.clip(params[-n:], a_min=conc_min)
+    return jnp.concatenate([params[0:3], concs])
+
 
 our_grad_fn = jit(value_and_grad(ofer_grad_fn, has_aux=True))
 params = init_params
 outer_optimizer = optax.adam(1e-2)
 opt_state = outer_optimizer.init(params)
 
-n_outer_iters = 300
+n_outer_iters = 400
 outer_losses = []
 
 
@@ -749,6 +759,10 @@ else:
 
 # param_names += [f"conc_{chr(ord('A') + i)}" for i in range(n)]
 param_names += ["Weak Eps"]
+param_names += [f"A conc:" ]
+param_names += [f"B conc:" ]
+param_names += [f"C conc:" ]
+
 final_results = []
 
 
@@ -765,6 +779,11 @@ with open("mass_law/output_file", "w") as f:
         # grads = masked_grads(grads)
         updates, opt_state = outer_optimizer.update(grads, opt_state)
         params = optax.apply_updates(params, updates)
+        conc_params = normalize_logits
+        params = abs_array(params)
+        norm_conc = normalize_logits(params[-n:], 0.001)
+        params = jnp.concatenate([params[:-n], norm_conc])
+        params = project(params)
         # params = project(params)
         print("Updated Parameters:")
         for name, value in {
@@ -773,15 +792,15 @@ with open("mass_law/output_file", "w") as f:
             print(f"{name}: {value}")
         print(params)
         fin_yield = ofer(params)
-        fin_yield = jnp.exp(fin_yield)
+        fin_yield = jnp.exp(fin_yield[0])
         print(f"Desired Yield: {args.desired_yield}, Final Yield: {fin_yield}")
 
     final_params = params
     fin_yield = ofer(params)
-    final_target_yields = jnp.exp(fin_yield)
+    final_target_yields = jnp.exp(fin_yield[0])
 
     f.write(
-        f"{args.desired_yield},{final_target_yields},{params[0]},{params[1]},{params[-1]}\n"
+        f"{args.desired_yield},{final_target_yields},{params[0]},{params[1]},{params[2]},{params[3]},{params[4]},{params[5]}\n"
     )
     f.flush()
 
