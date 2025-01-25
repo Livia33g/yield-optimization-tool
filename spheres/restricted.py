@@ -34,6 +34,7 @@ import numpy as np
 import jax.numpy as jnp
 import unittest
 from scipy.spatial import distance_matrix
+from scipy.spatial.transform import Rotation as R
 
 euler_scheme = "sxyz"
 V = 54000.0
@@ -214,10 +215,116 @@ def generate_connected_subsets_rb(vertex_coords, adj_matrix):
     return all_configs
 
 
-# adj_matrix_rb = are_blocks_connected_rb(rb_data, vertex_radius=1.0)
-# configs_rb = generate_connected_subsets_rb(rb_data, adj_matrix_rb)
+def generate_all_4_monomer_configs(vertex_coords, adjacency_matrix, target_size=4):
+    """
+    Generate all possible unique connected configurations of size `target_size` 
+    starting from a single monomer.
 
-# print(configs_rb[0])
+    Args:
+        vertex_coords (np.ndarray): Coordinates of the vertices.
+        adjacency_matrix (np.ndarray): Adjacency matrix representing connectivity.
+        target_size (int): Desired size of the connected configurations (default is 4).
+
+    Returns:
+        np.ndarray: An array of unique connected configurations of size `target_size`.
+    """
+    def explore(current_config, remaining_vertices):
+        # If we reached the target size, save this configuration
+        if len(current_config) == target_size:
+            # Sort for canonical representation to avoid duplicates
+            current_config_sorted = tuple(sorted(current_config))
+            unique_configs.add(current_config_sorted)
+            return
+
+        # Explore neighbors of the current configuration
+        for vertex in current_config:
+            neighbors = set(np.where(adjacency_matrix[vertex] == 1)[0])
+            for neighbor in neighbors:
+                if neighbor in remaining_vertices:  # Only consider unvisited vertices
+                    explore(current_config + [neighbor], remaining_vertices - {neighbor})
+
+    # Initialize
+    unique_configs = set()
+
+    # Start from each vertex as the initial configuration
+    for start_vertex in range(len(vertex_coords)):
+        explore([start_vertex], set(range(len(vertex_coords))) - {start_vertex})
+
+    # Build the final configurations using vertex coordinates
+    final_configs = [vertex_coords[np.array(list(config))] for config in unique_configs]
+
+    return np.array(final_configs)
+
+def normalize_structure(config):
+    """
+    Normalize a configuration by centering it around the origin
+    and scaling it to a consistent size.
+
+    Args:
+        config (np.ndarray): A configuration of shape (N, 6).
+
+    Returns:
+        np.ndarray: Normalized configuration of shape (N, 3).
+    """
+    # Extract positional data
+    positions = config[:, :3]
+    # Center around the origin
+    centered = positions - positions.mean(axis=0)
+    # Normalize scale
+    scale = np.linalg.norm(centered)
+    normalized = centered / scale if scale != 0 else centered
+    return normalized
+
+def generate_rotational_equivalents(config):
+    """
+    Generate all rotational equivalents of a configuration.
+
+    Args:
+        config (np.ndarray): A configuration of shape (N, 3).
+
+    Returns:
+        list: List of rotated configurations.
+    """
+    rotations = R.create_group('O').as_matrix()  # Orthogonal group (rotations)
+    rotated_configs = [config @ rot.T for rot in rotations]
+    return rotated_configs
+
+def filter_unique_rotations(configs):
+    """
+    Filter configurations to retain only unique structures under rotation.
+
+    Args:
+        configs (np.ndarray): Array of configurations of shape (M, N, 6).
+
+    Returns:
+        np.ndarray: Filtered unique configurations of shape (K, N, 6).
+    """
+    unique_configs = set()
+
+    for config in configs:
+        # Normalize the configuration
+        normalized = normalize_structure(config)
+        # Generate rotational equivalents
+        equivalents = generate_rotational_equivalents(normalized)
+        # Create a hashable representation for each equivalent
+        hashed_equivalents = {tuple(np.round(eq.flatten(), decimals=6)) for eq in equivalents}
+        # Check if any equivalent is already in the unique set
+        if not hashed_equivalents & unique_configs:
+            unique_configs.add(next(iter(hashed_equivalents)))  # Add one representative
+
+    # Convert back to NumPy array
+    filtered_configs = [np.array(config).reshape(-1, 3) for config in unique_configs]
+    return np.array(filtered_configs)
+
+
+full_shell_coord = load_rb_orientation_vec(file_paths)[0]
+adjacency_matrix = are_blocks_connected_rb(full_shell_coord, 2)
+
+configs_4 = generate_all_4_monomer_configs(full_shell_coord, adjacency_matrix, target_size=4)
+    
+configs_3 = filter_unique_rotations(configs_4)
+pdb.set_trace()
+
 vertex_species = 0
 n_species = 2
 vertex_radius = 2.0
@@ -375,7 +482,7 @@ def adjust_sigmas(sigmas):
     adjusted_sigmas = {}
     for size, sigma in sigmas.items():
         if size > 1:
-            adjusted_sigmas[size] = sigma * (5 ** size)
+            adjusted_sigmas[size] = sigma * (5 ** (size-1))
         else:
             adjusted_sigmas[size] = 1
     return adjusted_sigmas
@@ -401,15 +508,19 @@ shapes_species = [get_icos_shape_and_species(size) for size in range(1, 13)]
 shapes, species = zip(*shapes_species)
 
 
-"""
+
 import os
 
 # Create the directory if it doesn't exist
-output_dir = "pos_files"
+output_dir = "pos_4_files"
 os.makedirs(output_dir, exist_ok=True)
+num_struc = len(jnp.array(configs_3))
+pdb.set_trace()
+configs_3_flat = [config.flatten() for config in configs_3]
 
-for inx in range(12):
-    pos72 = utils.get_positions(rbs[inx], shapes_species[inx][0])
+
+for inx in range(num_struc):
+    pos72 = utils.get_positions(configs_3_flat[inx], shapes_species[3][0])
     vertex_radius = 2.0
 
     box_size = 30.0
@@ -452,7 +563,7 @@ for inx in range(12):
         of.write("\n".join(all_lines))
 
 pdb.set_trace()
-"""
+
 energy_fns = {12: jit(get_nmer_energy_fn(12))}
 
 mon_energy_fn = lambda q, pos, species, opt_params: 0.0
