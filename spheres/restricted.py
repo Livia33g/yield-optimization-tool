@@ -253,17 +253,78 @@ def generate_all_4_monomer_configs(vertex_coords, adjacency_matrix, target_size=
     # Build the final configurations using vertex coordinates
     final_configs = [vertex_coords[np.array(list(config))] for config in unique_configs]
 
-    return np.array(final_configs)
-
+    return jnp.array(final_configs)
 
 full_shell_coord = load_rb_orientation_vec(file_paths)[0]
 adjacency_matrix = are_blocks_connected_rb(full_shell_coord, 2)
 
+rb_2 = generate_connected_subsets_rb(full_shell_coord, adjacency_matrix)[1]
 configs_4 = generate_all_4_monomer_configs(full_shell_coord, adjacency_matrix, target_size=4)
-configs_2 = generate_all_4_monomer_configs(full_shell_coord, adjacency_matrix, target_size=2)[0]
+
+def invert_monomer_orientation_relative_to_patch(configs_2, connecting_patch_idx):
+    """
+    Invert the orientation of the second monomer relative to a specified connecting patch.
+
+    Args:
+        configs_2 (np.ndarray): Array of shape (2, 6) representing two monomers.
+        connecting_patch_idx (int): Index of the patch to rotate around (0-5 for a 6-patch system).
+
+    Returns:
+        np.ndarray: Updated configuration with the second monomer's orientation and position inverted.
+    """
+    configs_2 = configs_2.copy()  # Ensure we don't modify the input array directly
+    first_monomer = configs_2[0]
+    second_monomer = configs_2[1]
+
+    # Extract positional and orientation data
+    first_vertex = first_monomer[:3]
+    second_vertex = second_monomer[:3]
+    orientation = second_monomer[3:]  # Orientation of the second monomer
+
+    # Vector pointing from the first vertex to the second vertex
+    connection_vector = second_vertex - first_vertex
+
+    # Normalize the connection vector
+    if np.linalg.norm(connection_vector) == 0:
+        raise ValueError("The monomers are at the same position; cannot define a connection vector.")
+    connection_vector /= np.linalg.norm(connection_vector)
+
+    # Define a rotation matrix for 180 degrees around the connection vector
+    rotation_matrix = R.from_rotvec(np.pi * connection_vector).as_matrix()
+
+    # Apply rotation to the second monomer's vertex and orientation
+    rotated_vertex = first_vertex + rotation_matrix @ (second_vertex - first_vertex)
+    rotated_orientation = rotation_matrix @ orientation
+
+    # Update the second monomer in configs_2
+    configs_2[1, :3] = rotated_vertex
+    configs_2[1, 3:] = rotated_orientation
+
+    return configs_2
+
+
+
+# Example Usage
+configs_2 = generate_all_4_monomer_configs(full_shell_coord, adjacency_matrix, target_size=2)[1]
+print("Before inversion:")
+print(configs_2)
+
+# Invert the orientation of the second monomer relative to the first patch
+#configs_2_inv = invert_monomer_orientation_relative_to_patch(configs_2, connecting_patch_idx=0)
+
+print("After inversion:")
+print(configs_2.shape)
+#configs_2_tot = jnp.array([rb_2, configs_2_inv])
+
+#configs_2 = generate_all_4_monomer_configs(full_shell_coord, adjacency_matrix, target_size=2)[0]
+
+
 configs_true = configs_4[:4]
-pdb.set_trace()
-configs_true_flat = [config.flatten() for config in configs_true]
+print("shape 4", configs_4.shape)
+#configs_2_inv = jnp.array(configs_2_inv)
+#configs_2_flat = [config.flatten() for config in configs_2_tot]
+
+#print(configs_2_flat[1].shape)
    
 #configs_4 = np.array(configs_4)
 
@@ -444,30 +505,30 @@ full_shell_coord = load_rb_orientation_vec(file_paths)[0]
 # print(full_shell_coord)
 # print(full_shell_coord.shape)
 adj_ma = are_blocks_connected_rb(full_shell_coord)
-rbs = generate_connected_subsets_rb(full_shell_coord, adj_ma)
+rbs = generate_connected_subsets_rb(full_shell_coord, adj_ma)[1]
 rbs = [rb.flatten() for rb in rbs]
 shapes_species = [get_icos_shape_and_species(size) for size in range(1, 13)]
 shapes, species = zip(*shapes_species)
 
 
-"""
+
 import os
 
 # Create the directory if it doesn't exist
 output_dir = "pos_4_files"
 os.makedirs(output_dir, exist_ok=True)
-num_struc = len(jnp.array(configs_4))
+
 configs_true = configs_4[:4]
-pdb.set_trace()
+#pdb.set_trace()
 configs_true_flat = [config.flatten() for config in configs_true]
 
 
-for inx in range(num_struc):
+for inx in range(4):
     pos72 = utils.get_positions(configs_true_flat[inx], shapes_species[3][0])
     vertex_radius = 2.0
 
     box_size = 30.0
-    patch_radius = 0.01
+    patch_radius = 0.5
     vertex_color = "43a5be"
     patch_color = "4fb06d"
     body_pos = pos72.reshape(-1, 3)
@@ -506,7 +567,7 @@ for inx in range(num_struc):
         of.write("\n".join(all_lines))
 
 pdb.set_trace()
-"""
+
 energy_fns = {12: jit(get_nmer_energy_fn(12))}
 
 mon_energy_fn = lambda q, pos, species, opt_params: 0.0
