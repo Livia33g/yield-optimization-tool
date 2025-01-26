@@ -102,7 +102,7 @@ def load_species_combinations(filename):
 
 data = load_species_combinations("arvind_3.pkl")
 
-data_tetr = load_species_combinations("tetramers.pkl")
+data_tetr = load_species_combinations("polymer_extracted.pkl")
 
 num_monomers = max(
     int(k.split("_")[0]) for k in data.keys() if k.endswith("_pc_species")
@@ -159,7 +159,7 @@ small_value = 1e-12
 vertex_species = 0
 n_patches = n * 2  # 2 species of patches per monomer type
 n_species = n_patches + 1  # plus the common vertex species 0
-
+max_poly = 6
 n_morse_vals = (
     n_patches * (n_patches - 1) // 2 + n_patches
 )  # all possible pair permutations plus same patch attraction (i,i)
@@ -410,6 +410,7 @@ def compute_zc(boltzmann_weight, z_rot_mod_sigma, z_vib, sigma, V=V):
 
 
 sizes = range(1, n + 1)
+sizes_mass = range(n + 1, max_poly + 1)
 
 
 rbs = {}
@@ -419,24 +420,24 @@ for size in sizes:
     rb, subkey = make_rb(size, subkey)
     rbs[size] = rb
     main_key = subkey
+for size in sizes_mass:
+    main_key, subkey = random.split(main_key)
+    rb, subkey = make_rb(size, subkey)
+    rbs[size] = rb
+    main_key = subkey
 
 shapes = {size: make_shape(size) for size in sizes}
 sigmas = {size: data[f"{size}_sigma"] for size in sizes if f"{size}_sigma" in data}
 energy_fns = {size: jit(get_nmer_energy_fn(size)) for size in range(2, n + 1)}
+shapes_mass = {size: make_shape(size) for size in sizes_mass}
+sigmas_mass = {
+    size: data[f"{size}_sigma"] for size in sizes_mass if f"{size}_sigma" in data
+}
+energy_fns_mass = {size: jit(get_nmer_energy_fn(size)) for size in sizes_mass}
 
-e_plus_1_fn = get_nmer_energy_fn(n + 1)
-e_plus_2_fn = get_nmer_energy_fn(n + 2)
-
-main_key, subkey = random.split(main_key)
-rb_plus_1, subkey = make_rb(n + 1, subkey)
-main_key = subkey
-main_key, subkey = random.split(main_key)
-rb_plus_2, subkey = make_rb(n + 2, subkey)
-main_key = subkey
-
-shape_plus_1 = make_shape(n + 1)
-shape_plus_2 = make_shape(n + 2)
-
+for size in sizes_mass:
+    species = data_tetr[f"{size}_pc_species"]
+    sigma = data_tetr[f"{size}_sigma"]
 
 rb1 = rbs[1]
 shape1 = shapes[1]
@@ -488,6 +489,7 @@ def get_log_z_all(opt_params):
         species = data[f"{size}_pc_species"]
         sigma = data[f"{size}_sigma"]
 
+
         # Repeat sigma for each structure in species of the current size
         sigma_array = jnp.full(species.shape[0], sigma)
 
@@ -524,27 +526,39 @@ def get_log_z_all(opt_params):
 
 # Example monomer counts
 monomer_counts = []
+monomer_counts_mass = {
+    size: {letter: [] for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"}
+    for size in range(n + 1, max_poly + 1)
+}
+
 for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
     counts_list = []
     for i in range(1, n + 1):
         key = f"{letter}_{i}_counts"
-        if key in data:
-            counts_list.append(data[key])
+        if key in data_tetr:
+            counts_list.append(data_tetr[key])
     if counts_list:
         monomer_counts.append(jnp.concatenate(counts_list))
 
+    for i in range(n + 1, max_poly + 1):
+        key = f"{letter}_{i}_counts"
+        if key in data_tetr:
+            monomer_counts_mass[i][letter].append(data_tetr[key])
+
+# Convert monomer_counts_mass to the desired shape
+for size in monomer_counts_mass:
+    for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+        if monomer_counts_mass[size][letter]:
+            monomer_counts_mass[size][letter] = jnp.concatenate(
+                monomer_counts_mass[size][letter]
+            )
+        else:
+            monomer_counts_mass[size][letter] = jnp.array([])  # Handle empty lists
+
+pdb.set_trace()
 
 nper_structure = jnp.array(monomer_counts)
-species_tetr = data_tetr[f"4_pc_species"]
-
-tetramer_counts = {
-    key.split("_")[0]: data_tetr[key]
-    for key in data_tetr.keys()
-    if key.endswith("_4_counts")
-}
-
-tetramer_counts_array = jnp.array(list(tetramer_counts.values()))
-# tetramer_counts_array = jnp.array([tetramer_counts[key] for key in sorted(tetramer_counts.keys())])
+nper_structure_mass = jnp.array(monomer_counts_mass)
 
 
 def loss_fn(log_concs_struc, log_z_list, opt_params):
@@ -576,38 +590,10 @@ def loss_fn(log_concs_struc, log_z_list, opt_params):
 
         return jnp.sqrt((log_vcs - vcs_denom - log_zs + z_denom) ** 2)
 
-    final_mon_conc = jnp.exp(log_concs_struc[:n]).sum()
-
-    def log_massact_loss_fn(opt_params, struc_idx):
-
-        def mon_sum(mon_idx):
-
-            conc_mon_cont = (
-                tetramer_counts_array[mon_idx, struc_idx] * log_concs_struc[mon_idx]
-            )
-
-            return conc_mon_cont
-
-        e_plus_1 = e_plus_1_fn(
-            rb_plus_1, shape_plus_1, species_tetr[struc_idx], opt_params
-        )
-
-        presum_mon = vmap(mon_sum)(jnp.arange(n))
-
-        mass_act_loss = -1 / kT * e_plus_1 + jnp.sum(presum_mon) + jnp.log(n + 1)
-
-        return mass_act_loss
-
     mon_loss = vmap(mon_loss_fn)(jnp.arange(num_monomers))
     struc_loss = vmap(struc_loss_fn)(jnp.arange(num_monomers, tot_num_structures))
-    """
-    mass_act_loss_fun = vmap(log_massact_loss_fn, in_axes=(None, 0))
-    mass_act_loss = jnp.sum(mass_act_loss_fun(opt_params, jnp.arange(species_tetr.shape[0])))
 
-    mass_act_loss_log = jnp.array([ mass_act_loss])
-    """
     loss_var = jnp.var(jnp.concatenate([mon_loss, struc_loss]))
-    # combined_losses = jnp.concatenate([mon_loss, struc_loss, mass_act_loss_log])
     combined_losses = jnp.concatenate([mon_loss, struc_loss])
     combined_loss = jnp.linalg.norm(combined_losses)
 
@@ -643,38 +629,6 @@ def inner_solver(init_guess, log_z_list, opt_params):
     return final_params
 
 
-#########################
-
-"""
-def return_both_yields(func):
-    @wraps(func)
-    def wrapper(*args, return_both=False, **kwargs):
-        target_yield, mon_yield_tot, tots = func(*args, **kwargs)
-        if return_both:
-            return target_yield, mon_yield_tot, tots
-        return target_yield
-
-    return wrapper
-
-
-@return_both_yields
-def ofer(opt_params):
-    log_z_list = get_log_z_all(opt_params)
-    tot_conc = opt_params[-n:].sum()
-    struc_concs_guess = jnp.full(
-        tot_num_structures, safe_log(tot_conc / tot_num_structures)
-    )
-    fin_log_concs = inner_solver(struc_concs_guess, log_z_list, opt_params)
-    fin_concs = jnp.exp(fin_log_concs)
-    yields = fin_concs / jnp.sum(fin_concs)
-    target_yield = safe_log(yields[target_idx])
-    mon_yield_tot = jnp.sum(yields[:n])
-    # return target_yield, jnp.sum(fin_concs)  # mon_yield_tot
-    # return target_yield, mon_yield_tot
-    return target_yield, fin_concs[:n], fin_concs.sum()
-"""
-
-
 def safe_exp(x, lower_bound=-709.0, upper_bound=709.0):
 
     clipped_x = jnp.clip(x, a_min=lower_bound, a_max=upper_bound)
@@ -696,40 +650,30 @@ def ofer(opt_params):
 
 
 def ofer_grad_fn(opt_params, desired_yield_val):
+
     target_yield, mon_concs, fin_conc = ofer(opt_params)
 
-    # e_plus_1 = (e_plus_1_fn(rb_plus_1, shape_plus_1, jnp.tile(jnp.array([1, 0, 2]), n + 1), opt_params) - 1) / n - 1
-    # e_plus_2 = (e_plus_2_fn(rb_plus_2, shape_plus_2, jnp.tile(jnp.array([1, 0, 2]),n + 2), opt_params) - 1)/(n+1) - 1
-    # """
-    def log_massact_loss_fn(opt_params, struc_idx):
+    def log_massact_loss_fn(size, opt_params):
 
-        def mon_sum(mon_idx):
+        def mini_loss(struc_inx):
 
-            conc_mon_cont = jnp.sum(
-                tetramer_counts_array[mon_idx, struc_idx] * safe_log(mon_concs[mon_idx])
-            )
+            def mon_prod(mon_idx):
+                return nper_structure[mon_idx][struc_inx] * safe_log(mon_concs[mon_idx])
+            
+            presum_mons = vmap(mon_prod)(jnp.arange(n))
+            postsum_mons = jnp.sum(presum_mons)
 
-            return conc_mon_cont
+            struc_energy = energy_fns[size](rbs[size], shapes[size], species_data[f"{size}_pc_species"][struc_inx], opt_params)
+            struc_mass_loss = safe_log(size) -1/kT * struc_energy * n + postsum_mons
+            return struc_mass_loss
+        
+        all_size_mass_losses = vmap(mini_loss)(jnp.arange(species_data[f"{size}_pc_species"].shape[0]))
 
-        e_plus_1 = e_plus_1_fn(
-            rb_plus_1, shape_plus_1, species_tetr[struc_idx], opt_params
-        )
-
-        presum_mons = vmap(mon_sum)(jnp.arange(n))
-
-        mass_act_loss = -1 / kT * e_plus_1 + jnp.sum(presum_mons) + jnp.log(n + 1)
-
-        return mass_act_loss
-
-    mass_act_loss_logs = vmap(log_massact_loss_fn, in_axes=(None, 0))
-    # mass_act_loss = jnp.sqrt((init_conc-fin_conc+jnp.sum(mass_act_loss_fun(opt_params, species_tetr)))**2)
-
-    mass_act_loss = jnp.sum(
-        mass_act_loss_logs(opt_params, jnp.arange(species_tetr.shape[0]))
-    )
-
-    # loss = jnp.linalg.norm(desired_yield_val - jnp.exp(target_yield))
-    loss = 10000 * (abs(jnp.log(desired_yield_val) - target_yield)) ** 2 + mass_act_loss
+        return jnp.sum(all_size_mass_losses)
+    
+    tot_mass_loss = vmap(log_massact_loss_fn, in_axes=(0, None))(jnp.arange(n + 1, max_poly + 1), opt_params)
+    
+    loss = 10000 * (abs(jnp.log(desired_yield_val) - target_yield)) ** 2 + tot_mass_loss
 
     # loss = (abs(jnp.log(desired_yield_val)- target_yield))**2
 
