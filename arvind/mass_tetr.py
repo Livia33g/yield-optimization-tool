@@ -431,13 +431,18 @@ sigmas = {size: data[f"{size}_sigma"] for size in sizes if f"{size}_sigma" in da
 energy_fns = {size: jit(get_nmer_energy_fn(size)) for size in range(2, n + 1)}
 shapes_mass = {size: make_shape(size) for size in sizes_mass}
 sigmas_mass = {
-    size: data[f"{size}_sigma"] for size in sizes_mass if f"{size}_sigma" in data
+    size: data_tetr[f"{size}_sigma"]
+    for size in sizes_mass
+    if f"{size}_sigma" in data_tetr
 }
+species_mass = {
+    size: data_tetr[f"{size}_pc_species"]
+    for size in sizes_mass
+    if f"{size}_sigma" in data_tetr
+}
+
 energy_fns_mass = {size: jit(get_nmer_energy_fn(size)) for size in sizes_mass}
 
-for size in sizes_mass:
-    species = data_tetr[f"{size}_pc_species"]
-    sigma = data_tetr[f"{size}_sigma"]
 
 rb1 = rbs[1]
 shape1 = shapes[1]
@@ -489,7 +494,6 @@ def get_log_z_all(opt_params):
         species = data[f"{size}_pc_species"]
         sigma = data[f"{size}_sigma"]
 
-
         # Repeat sigma for each structure in species of the current size
         sigma_array = jnp.full(species.shape[0], sigma)
 
@@ -531,34 +535,18 @@ monomer_counts_mass = {
     for size in range(n + 1, max_poly + 1)
 }
 
+monomer_counts = []
 for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
     counts_list = []
     for i in range(1, n + 1):
         key = f"{letter}_{i}_counts"
-        if key in data_tetr:
-            counts_list.append(data_tetr[key])
+        if key in data:
+            counts_list.append(data[key])
     if counts_list:
         monomer_counts.append(jnp.concatenate(counts_list))
 
-    for i in range(n + 1, max_poly + 1):
-        key = f"{letter}_{i}_counts"
-        if key in data_tetr:
-            monomer_counts_mass[i][letter].append(data_tetr[key])
-
-# Convert monomer_counts_mass to the desired shape
-for size in monomer_counts_mass:
-    for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
-        if monomer_counts_mass[size][letter]:
-            monomer_counts_mass[size][letter] = jnp.concatenate(
-                monomer_counts_mass[size][letter]
-            )
-        else:
-            monomer_counts_mass[size][letter] = jnp.array([])  # Handle empty lists
-
-pdb.set_trace()
 
 nper_structure = jnp.array(monomer_counts)
-nper_structure_mass = jnp.array(monomer_counts_mass)
 
 
 def loss_fn(log_concs_struc, log_z_list, opt_params):
@@ -654,30 +642,45 @@ def ofer_grad_fn(opt_params, desired_yield_val):
     target_yield, mon_concs, fin_conc = ofer(opt_params)
 
     def log_massact_loss_fn(size, opt_params):
+        # Use `species_mass` as a static Python dictionary
+        if size not in species_mass:
+            print(f"Warning: Key {size} not found in species_mass. Skipping.")
+            print("static size :", size)
+            return 0.0
 
         def mini_loss(struc_inx):
-
             def mon_prod(mon_idx):
                 return nper_structure[mon_idx][struc_inx] * safe_log(mon_concs[mon_idx])
-            
+
             presum_mons = vmap(mon_prod)(jnp.arange(n))
             postsum_mons = jnp.sum(presum_mons)
 
-            struc_energy = energy_fns[size](rbs[size], shapes[size], species_data[f"{size}_pc_species"][struc_inx], opt_params)
-            struc_mass_loss = safe_log(size) -1/kT * struc_energy * n + postsum_mons
+            struc_energy = energy_fns[size](
+                rbs[size],
+                shapes[size],
+                jnp.array(species_mass[size])[struc_inx],
+                opt_params,
+            )
+            struc_mass_loss = safe_log(size) - 1 / kT * struc_energy * n + postsum_mons
             return struc_mass_loss
-        
-        all_size_mass_losses = vmap(mini_loss)(jnp.arange(species_data[f"{size}_pc_species"].shape[0]))
 
+        # Use `len` on a concrete array
+        amount_of_strucs = jnp.array(species_mass[size]).shape[0]
+        all_size_mass_losses = vmap(mini_loss)(jnp.arange(amount_of_strucs))
         return jnp.sum(all_size_mass_losses)
-    
-    tot_mass_loss = vmap(log_massact_loss_fn, in_axes=(0, None))(jnp.arange(n + 1, max_poly + 1), opt_params)
-    
+
+    static_sizes = jnp.array(list(species_mass.keys()))
+    print("static size :", static_sizes)
+    loss_per_size = vmap(lambda size: log_massact_loss_fn(size, opt_params))(
+        static_sizes
+    )
+
+    # Sum over all sizes to compute total mass loss
+    tot_mass_loss = jnp.sum(loss_per_size)
+
     loss = 10000 * (abs(jnp.log(desired_yield_val) - target_yield)) ** 2 + tot_mass_loss
 
-    # loss = (abs(jnp.log(desired_yield_val)- target_yield))**2
-
-    return loss, safe_exp(mass_act_loss)
+    return loss, safe_exp(tot_mass_loss)
 
 
 def abs_array(par):
@@ -714,7 +717,8 @@ def project(params):
     return jnp.concatenate([params[0:3], concs])
 
 
-our_grad_fn = jit(value_and_grad(ofer_grad_fn, has_aux=True))
+# our_grad_fn = jit(value_and_grad(ofer_grad_fn, has_aux=True))
+our_grad_fn = value_and_grad(ofer_grad_fn, has_aux=True)
 params = init_params
 outer_optimizer = optax.adam(1e-2)
 opt_state = outer_optimizer.init(params)
