@@ -34,6 +34,7 @@ import gc
 import os
 import networkx as nx
 from itertools import product
+import string
 
 # Set up argument parsing
 parser = argparse.ArgumentParser(description="Simulation with adjustable parameters.")
@@ -102,7 +103,20 @@ def load_species_combinations(filename):
 
 data = load_species_combinations("arvind_3.pkl")
 
+for key in data.keys():
+    if isinstance(data[key], onp.ndarray):  # Convert NumPy arrays to JAX arrays
+        data[key] = jnp.array(data[key])
+    elif isinstance(data[key], int):  # Ensure counts are not traced
+        data[key] = int(data[key])
+
 data_tetr = load_species_combinations("polymer_extracted.pkl")
+
+# Convert only when needed
+for key in data_tetr.keys():
+    if isinstance(data_tetr[key], onp.ndarray):  # Convert NumPy arrays to JAX arrays
+        data_tetr[key] = jnp.array(data_tetr[key])
+    elif isinstance(data_tetr[key], int):  # Ensure counts are not traced
+        data_tetr[key] = int(data_tetr[key])
 
 num_monomers = max(
     int(k.split("_")[0]) for k in data.keys() if k.endswith("_pc_species")
@@ -411,6 +425,7 @@ def compute_zc(boltzmann_weight, z_rot_mod_sigma, z_vib, sigma, V=V):
 
 sizes = range(1, n + 1)
 sizes_mass = range(n + 1, max_poly + 1)
+sizes_mass_list = list(sizes_mass)
 
 
 rbs = {}
@@ -440,6 +455,7 @@ species_mass = {
     for size in sizes_mass
     if f"{size}_sigma" in data_tetr
 }
+
 
 energy_fns_mass = {size: jit(get_nmer_energy_fn(size)) for size in sizes_mass}
 
@@ -528,12 +544,23 @@ def get_log_z_all(opt_params):
     return log_z_all
 
 
-# Example monomer counts
-monomer_counts = []
-monomer_counts_mass = {
-    size: {letter: [] for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"}
-    for size in range(n + 1, max_poly + 1)
-}
+monomer_counts_mass = [{} for _ in range(26)]
+
+for letter_idx, letter in enumerate(string.ascii_uppercase):
+    for i in sizes_mass:
+        key = f"{letter}_{i}_counts"
+        if key in data_tetr:
+            if i not in monomer_counts_mass[letter_idx]:
+                monomer_counts_mass[letter_idx][i] = []
+
+            monomer_counts_mass[letter_idx][i].append(data_tetr[key])
+
+for letter_idx in range(len(monomer_counts_mass)):
+    for size in monomer_counts_mass[letter_idx]:
+        monomer_counts_mass[letter_idx][size] = jnp.concatenate(
+            monomer_counts_mass[letter_idx][size]
+        )
+
 
 monomer_counts = []
 for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
@@ -638,48 +665,70 @@ def ofer(opt_params):
 
 
 def ofer_grad_fn(opt_params, desired_yield_val):
-
     target_yield, mon_concs, fin_conc = ofer(opt_params)
 
-    def log_massact_loss_fn(size, opt_params):
-        # Use `species_mass` as a static Python dictionary
-        if size not in species_mass:
-            print(f"Warning: Key {size} not found in species_mass. Skipping.")
-            print("static size :", size)
-            return 0.0
+    sizes_mass_jnp = jnp.array(
+        sizes_mass_list
+    )  # Ensure sizes_mass_list is a JAX array for vmap
+
+    # Pre-calculate amount_of_strucs values *outside* the JAX function as a JAX array
+    amount_of_strucs_array = jnp.array(
+        onp.array([data_tetr[f"{size}_amount_structures"] for size in sizes_mass_list])
+    )
+
+    # pdb.set_trace()
+
+    def log_massact_loss_fn_for_size(
+        size_index, opt_params, amount_of_strucs
+    ):  # Take size_index and amount_of_strucs
+        size_concrete = sizes_mass_jnp[size_index]  # Get concrete size using size_index
+        # amount_of_strucs = amount_of_strucs_array[size_index] # Get amount_of_strucs using size_index - passed as argument now
+
+        print(
+            f"Debugging in log_massact_loss_fn: size = {size_concrete}, amount_of_strucs = {amount_of_strucs}"
+        )
 
         def mini_loss(struc_inx):
             def mon_prod(mon_idx):
-                return nper_structure[mon_idx][struc_inx] * safe_log(mon_concs[mon_idx])
+                size_concrete_int = int(
+                    size_concrete
+                )  # Convert to concrete Python integer
+                count = monomer_counts_mass[mon_idx][str(size_concrete_int)][struc_inx]
+
+                count = monomer_counts_mass[mon_idx][str(size_concrete)][struc_inx]
+                return count * safe_log(mon_concs[mon_idx])
 
             presum_mons = vmap(mon_prod)(jnp.arange(n))
             postsum_mons = jnp.sum(presum_mons)
 
-            struc_energy = energy_fns[size](
-                rbs[size],
-                shapes[size],
-                jnp.array(species_mass[size])[struc_inx],
+            struc_energy = energy_fns_mass[size_concrete](  # Use size_concrete here
+                rbs[size_concrete],  # Use size_concrete here
+                shapes_mass[size_concrete],  # Use size_concrete here
+                jnp.array(species_mass[size_concrete])[
+                    struc_inx
+                ],  # Use size_concrete here
                 opt_params,
             )
-            struc_mass_loss = safe_log(size) - 1 / kT * struc_energy * n + postsum_mons
+            struc_mass_loss = (
+                safe_log(size_concrete) - 1 / kT * struc_energy * n + postsum_mons
+            )  # Use size_concrete here
             return struc_mass_loss
 
-        # Use `len` on a concrete array
-        amount_of_strucs = jnp.array(species_mass[size]).shape[0]
-        all_size_mass_losses = vmap(mini_loss)(jnp.arange(amount_of_strucs))
+        all_size_mass_losses = vmap(mini_loss)(amount_of_strucs_array)
+        pdb.set_trace()
         return jnp.sum(all_size_mass_losses)
 
-    static_sizes = jnp.array(list(species_mass.keys()))
-    print("static size :", static_sizes)
-    loss_per_size = vmap(lambda size: log_massact_loss_fn(size, opt_params))(
-        static_sizes
+    # Vectorize over size_index using vmap, passing both size_index and amount_of_strucs_array
+    size_indices_for_vmap = jnp.arange(len(sizes_mass_jnp))  # JAX array of indices
+    loss_per_size = vmap(log_massact_loss_fn_for_size, in_axes=(0, None, 0))(
+        size_indices_for_vmap,
+        opt_params,
+        amount_of_strucs_array,  # Pass amount_of_strucs_array here
     )
 
-    # Sum over all sizes to compute total mass loss
-    tot_mass_loss = jnp.sum(loss_per_size)
+    tot_mass_loss = jnp.sum(loss_per_size)  # Sum up losses across all sizes
 
     loss = 10000 * (abs(jnp.log(desired_yield_val) - target_yield)) ** 2 + tot_mass_loss
-
     return loss, safe_exp(tot_mass_loss)
 
 
