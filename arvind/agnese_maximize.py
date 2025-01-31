@@ -19,7 +19,6 @@ from tqdm import tqdm
 from jax_md import space
 import potentials
 import utils
-import shapes as sp
 from jax_transformations3d import jax_transformations3d as jts
 from jaxopt import implicit_diff, GradientDescent
 from checkpoint import checkpoint_scan
@@ -31,20 +30,22 @@ import matplotlib.pyplot as plt
 from jax.config import config
 import gc
 import os
+import argparse
 
 
 SEED = 42
 main_key = random.PRNGKey(SEED)
 
-@partial(jit, static_argnums=(1,))
 
+@partial(jit, static_argnums=(1,))
 def safe_mask(mask, fn, operand, placeholder=0):
-  masked = jnp.where(mask, operand, 0)
-  return jnp.where(mask, fn(masked), placeholder)
+    masked = jnp.where(mask, operand, 0)
+    return jnp.where(mask, fn(masked), placeholder)
+
 
 def distance(dR):
-  dr = jnp.sum(dR ** 2, axis=-1)
-  return safe_mask(dr > 0, jnp.sqrt, dr)
+    dr = jnp.sum(dR**2, axis=-1)
+    return safe_mask(dr > 0, jnp.sqrt, dr)
 
 
 # dist_fn = jnp.linalg.norm
@@ -53,81 +54,105 @@ dist_fn = distance
 
 euler_scheme = "sxyz"
 
+
 def safe_log(x, eps=1e-10):
     return jnp.log(jnp.clip(x, a_min=eps, a_max=None))
 
+
 # Shape and energy helper functions
 a = 1.0  # distance of the center of the spheres from the BB COM
-b = 0.3 
-n = 2 # distance of the center of the patches from the BB COM
+b = 0.3
+n = 2  # distance of the center of the patches from the BB COM
 separation = 2.0
 noise = 1e-14
 vertex_radius = a
 patch_radius = 0.2 * a
 small_value = 1e-12
 vertex_species = 0
-n_species = 4 
+n_species = 4
+V = 54000.0
 
-init_patchy_vals = 4.5
 
+parser = argparse.ArgumentParser(description="Optimization script with argparse")
+parser.add_argument(
+    "--init_patchy_vals", type=float, required=True, help="Initial patchy values"
+)
+parser.add_argument(
+    "--init_kt", type=float, required=True, help="Initial temperature value"
+)
+parser.add_argument(
+    "--init_conc_val", type=float, required=True, help="Initial concentration value"
+)
+args = parser.parse_args()
+
+# Extract command-line arguments
+init_patchy_vals = args.init_patchy_vals
+init_kT = args.init_kt
+init_conc_val = args.init_conc_val
+
+# Set up parameters
 patchy_vals = jnp.full(3, init_patchy_vals)
-init_conc_val = 0.0005
-init_conc = jnp.full(n, init_conc_val)
-
-init_kT = jnp.array([0.5])
+init_conc = jnp.full(2, init_conc_val)
+init_kT = jnp.array([init_kT])
 init_params = jnp.concatenate([patchy_vals, init_kT, init_conc])
-V = 54000
 
- 
-#mon_shapes = [sp.make_shape(1, a, b, edge_patches="right"), sp.make_shape(1, a, b, edge_patches="right")]
 
-a = 1 # distance of the center of the spheres from the BB COM
-b = .3 # distance of the center of the patches from the BB COM
-mon_shape1 = onp.array([
-    [0., 0., a], # first sphere
-    [0., a*onp.cos(onp.pi/6.), -a*onp.sin(onp.pi/6.)], # second sphere
-    [0., -a*onp.cos(onp.pi/6.), -a*onp.sin(onp.pi/6.)], # third sphere
-    [a, 0., b], # first patch
-    [a, b*onp.cos(onp.pi/6.), -b*onp.sin(onp.pi/6.)], # second patch
-    [a, -b*onp.cos(onp.pi/6.), -b*onp.sin(onp.pi/6.)]  # third patch
-])
+# mon_shapes = [sp.make_shape(1, a, b, edge_patches="right"), sp.make_shape(1, a, b, edge_patches="right")]
 
-mon_shape2 = jts.matrix_apply(jts.reflection_matrix(jnp.array([0, 0, 0], dtype=jnp.float64),
-                                                   jnp.array([1, 0, 0], dtype=jnp.float64)),
-                             mon_shape1
-                         )
-mon_shape2  = jts.matrix_apply(jts.reflection_matrix(jnp.array([0, 0, 0], dtype=jnp.float64),
-                                                   jnp.array([0, 1, 0], dtype=jnp.float64)),
-                             mon_shape2
+a = 1  # distance of the center of the spheres from the BB COM
+b = 0.3  # distance of the center of the patches from the BB COM
+mon_shape1 = onp.array(
+    [
+        [0.0, 0.0, a],  # first sphere
+        [0.0, a * onp.cos(onp.pi / 6.0), -a * onp.sin(onp.pi / 6.0)],  # second sphere
+        [0.0, -a * onp.cos(onp.pi / 6.0), -a * onp.sin(onp.pi / 6.0)],  # third sphere
+        [a, 0.0, b],  # first patch
+        [a, b * onp.cos(onp.pi / 6.0), -b * onp.sin(onp.pi / 6.0)],  # second patch
+        [a, -b * onp.cos(onp.pi / 6.0), -b * onp.sin(onp.pi / 6.0)],  # third patch
+    ]
+)
+
+mon_shape2 = jts.matrix_apply(
+    jts.reflection_matrix(
+        jnp.array([0, 0, 0], dtype=jnp.float64), jnp.array([1, 0, 0], dtype=jnp.float64)
+    ),
+    mon_shape1,
+)
+mon_shape2 = jts.matrix_apply(
+    jts.reflection_matrix(
+        jnp.array([0, 0, 0], dtype=jnp.float64), jnp.array([0, 1, 0], dtype=jnp.float64)
+    ),
+    mon_shape2,
 )
 
 dimer_shape = jnp.array([mon_shape1, mon_shape2])
 
 
+mon_species_1 = onp.array([0, 0, 0, 1, 2, 3])
+mon_species_2 = onp.array([0, 0, 0, 1, 3, 2])
+dimer_species = onp.array([0, 0, 0, 1, 3, 2, 0, 0, 0, 1, 2, 3])
 
 
-mon_species_1 = onp.array([0,0,0,1,2,3])
-mon_species_2 = onp.array([0,0,0,1,3,2])
-dimer_species = onp.array([0,0,0,1,3,2,0,0,0,1,2,3])
+rb_1 = jnp.array([-separation / 2.0, 1e-15, 0, 0, 0, 0])
+rb_2 = jnp.array(
+    [-separation / 2.0, 1e-15, 0, 0, 0, 0, separation / 2.0, 0, 0, 0, 0, 0],
+    dtype=jnp.float64,
+)
 
 
-rb_1 = jnp.array([-separation/2.0, 1e-15, 0, 0, 0, 0])   
-rb_2 = jnp.array([-separation/2.0, 1e-15, 0, 0, 0, 0,
-                separation/2.0, 0, 0, 0, 0, 0], dtype=jnp.float64)   
-  
-    
 def get_positions(q, ppos):
     Mat = []
     for i in range(2):
-        qi = i*6
-        Mat.append(utils.convert_to_matrix(q[qi:qi+6]))
+        qi = i * 6
+        Mat.append(utils.convert_to_matrix(q[qi : qi + 6]))
 
     real_ppos = []
     for i in range(2):
         real_ppos.append(jts.matrix_apply(Mat[i], ppos[i]))
 
-    return real_ppos    
-    
+    return real_ppos
+
+
 rep_rmax_table = jnp.full((n_species, n_species), small_value)
 rep_rmax_table = rep_rmax_table.at[jnp.diag_indices(n_species)].set(2 * vertex_radius)
 rep_rmax_table = rep_rmax_table.at[0, 0].set(small_value)
@@ -140,9 +165,11 @@ rep_A_table = jnp.full((n_species, n_species), 500.0)
 rep_A_table = rep_A_table.at[0, 0].set(small_value)
 
 
-morse_narrow_alpha =5.
+morse_narrow_alpha = 5.0
 morse_alpha_table = jnp.full((n_species, n_species), small_value)
-morse_alpha_table = morse_alpha_table.at[jnp.diag_indices(n_species)].set(morse_narrow_alpha)
+morse_alpha_table = morse_alpha_table.at[jnp.diag_indices(n_species)].set(
+    morse_narrow_alpha
+)
 morse_alpha_table = morse_alpha_table.at[0, 0].set(small_value)
 
 
@@ -182,25 +209,26 @@ def pairwise_morse(ipos, jpos, i_species, j_species, opt_params):
 
 """
 
+
 @jit
 def get_energy_fns(q, pos, species, opt_params):
 
     Nbb = 2
 
-    morse_rcut = 8. / 5.
-    
+    morse_rcut = 8.0 / 5.0
+
     sphere_radius = 1.0
     patch_radius = 0.2 * sphere_radius
 
-
     tot_energy = jnp.float64(0)
     real_ppos = get_positions(q, pos)
+
     def j_repulsive_fn(j, pos1):
         pos2 = real_ppos[1][j]
-        r = dist_fn(pos1-pos2)
+        r = dist_fn(pos1 - pos2)
         return potentials.repulsive(
-            r, rmin=0, rmax=sphere_radius*2,
-            A=500., alpha=2.5)
+            r, rmin=0, rmax=sphere_radius * 2, A=500.0, alpha=2.5
+        )
 
     def i_repulsive_fn(i):
         pos1 = real_ppos[0][i]
@@ -208,39 +236,49 @@ def get_energy_fns(q, pos, species, opt_params):
         return jnp.sum(all_j_terms)
 
     repulsive_sm = jnp.sum(vmap(i_repulsive_fn)(jnp.arange(3)))
-    tot_energy += repulsive_sm        
+    tot_energy += repulsive_sm
 
     pos1 = real_ppos[0][3]
     pos2 = real_ppos[1][3]
 
-    r = dist_fn(pos1-pos2)
+    r = dist_fn(pos1 - pos2)
     tot_energy += potentials.morse_x(
-        r, rmin=0, rmax=morse_rcut,
+        r,
+        rmin=0,
+        rmax=morse_rcut,
         D0=opt_params[0],
-        alpha=5., r0=0.0,
-        ron=morse_rcut/2.)
+        alpha=5.0,
+        r0=0.0,
+        ron=morse_rcut / 2.0,
+    )
 
     pos1 = real_ppos[0][5]
     pos2 = real_ppos[1][4]
-    r = dist_fn(pos1-pos2)
+    r = dist_fn(pos1 - pos2)
     tot_energy += potentials.morse_x(
-        r, rmin=0, rmax=morse_rcut,
+        r,
+        rmin=0,
+        rmax=morse_rcut,
         D0=opt_params[1],
-    alpha=5., r0=0.0,
-        ron=morse_rcut/2.)
-
+        alpha=5.0,
+        r0=0.0,
+        ron=morse_rcut / 2.0,
+    )
 
     pos1 = real_ppos[0][4]
     pos2 = real_ppos[1][5]
-    r = dist_fn(pos1-pos2)
+    r = dist_fn(pos1 - pos2)
     tot_energy += potentials.morse_x(
-        r, rmin=0, rmax=morse_rcut,
+        r,
+        rmin=0,
+        rmax=morse_rcut,
         D0=opt_params[2],
-    alpha=5., r0=0.0,
-        ron=morse_rcut/2.)
+        alpha=5.0,
+        r0=0.0,
+        ron=morse_rcut / 2.0,
+    )
 
-
-    return tot_energy 
+    return tot_energy
 
 
 """
@@ -263,6 +301,8 @@ def get_energy(q, pos, species, opt_params):
     
     return tot_energy
 """
+
+
 def add_variables(ma, mb):
     """
     given two vectors of length (6,) corresponding to x,y,z,alpha,beta,gamma,
@@ -272,13 +312,14 @@ def add_variables(ma, mb):
     note: add_variables(ma,mb) != add_variables(mb,ma)
     """
 
-    Ma = convert_to_matrix(ma)
-    Mb = convert_to_matrix(mb)
-    Mab = jnp.matmul(Mb,Ma)
+    Ma = utils.convert_to_matrix(ma)
+    Mb = utils.convert_to_matrix(mb)
+    Mab = jnp.matmul(Mb, Ma)
     trans = jnp.array(jts.translation_from_matrix(Mab))
     angles = jnp.array(jts.euler_from_matrix(Mab, euler_scheme))
 
     return jnp.concatenate((trans, angles))
+
 
 def add_variables_all(mas, mbs):
     """
@@ -289,8 +330,9 @@ def add_variables_all(mas, mbs):
     mas_temp = jnp.reshape(mas, (mas.shape[0] // 6, 6))
     mbs_temp = jnp.reshape(mbs, (mbs.shape[0] // 6, 6))
 
-    return jnp.reshape(vmap(add_variables, in_axes=(0, 0))(
-        mas_temp, mbs_temp), mas.shape)
+    return jnp.reshape(
+        vmap(add_variables, in_axes=(0, 0))(mas_temp, mbs_temp), mas.shape
+    )
 
 
 """
@@ -380,6 +422,7 @@ def get_energy(q, pos, species, opt_params):
     return tot_energy
 """
 
+
 def hess(energy_fn, q, pos, species, opt_params):
     H = hessian(energy_fn)(q, pos, species, opt_params)
     evals, evecs = jnp.linalg.eigh(H)
@@ -388,21 +431,26 @@ def hess(energy_fn, q, pos, species, opt_params):
 
 def compute_zvib(energy_fn, q, pos, species, opt_params):
     evals, evecs = hess(energy_fn, q, pos, species, opt_params)
-    zvib = jnp.prod(jnp.sqrt(2.0 * jnp.pi / (opt_params[3]*(jnp.abs(evals[6:]) + 1e-12))))
+    zvib = jnp.prod(
+        jnp.sqrt(2.0 * jnp.pi / (opt_params[3] * (jnp.abs(evals[6:]) + 1e-12)))
+    )
     return zvib
 
 
-def compute_zrot_mod_sigma(energy_fn, q, pos, species, opt_params, key, size, nrandom=100000):
+def compute_zrot_mod_sigma(
+    energy_fn, q, pos, species, opt_params, key, size, nrandom=100000
+):
     Nbb = size
     evals, evecs = hess(energy_fn, q, pos, species, opt_params)
+
     def set_nu_random(key):
         quat = jts.random_quaternion(None, key)
         angles = jnp.array(jts.euler_from_quaternion(quat, euler_scheme))
-        nu0 = jnp.full((Nbb * 6,), 0.)
+        nu0 = jnp.full((Nbb * 6,), 0.0)
         return nu0.at[3:6].set(angles)
 
     def ftilde(nu):
-        nu = nu.astype(jnp.float32)  
+        nu = nu.astype(jnp.float32)
         q_tilde = jnp.matmul(evecs.T[6:].T, nu[6:])
         nu_tilde = jnp.reshape(jnp.array([nu[:6] for _ in range(Nbb)]), nu.shape)
         return utils.add_variables_all(q_tilde, nu_tilde)
@@ -412,8 +460,8 @@ def compute_zrot_mod_sigma(energy_fn, q, pos, species, opt_params, key, size, nr
     nu_fn = lambda nu: jnp.abs(jnp.linalg.det(jacfwd(ftilde)(nu)))
     Js = vmap(nu_fn)(nus)
     J = jnp.mean(Js)
-    Jtilde = 8.0 * (jnp.pi ** 2) * J
-    return Jtilde, Js, key 
+    Jtilde = 8.0 * (jnp.pi**2) * J
+    return Jtilde, Js, key
 
 
 def compute_zc(boltzmann_weight, z_rot_mod_sigma, z_vib, sigma=3, V=V):
@@ -424,30 +472,34 @@ def compute_zc(boltzmann_weight, z_rot_mod_sigma, z_vib, sigma=3, V=V):
 
 mon_energy_fn = lambda q, pos, species, opt_params: 0.0
 
-zrot_mod_sigma_1,_, main_key = compute_zrot_mod_sigma(mon_energy_fn, rb_1, mon_shape1, mon_species_1, patchy_vals, main_key, 1)
+zrot_mod_sigma_1, _, main_key = compute_zrot_mod_sigma(
+    mon_energy_fn, rb_1, mon_shape1, mon_species_1, patchy_vals, main_key, 1
+)
 zvib_1 = 1.0
 boltzmann_weight = 1.0
 
-z_1 = compute_zc(boltzmann_weight, zrot_mod_sigma_1, zvib_1)  
+z_1 = compute_zc(boltzmann_weight, zrot_mod_sigma_1, zvib_1)
 z_1s = jnp.full(n, z_1)
 log_z_1 = safe_log(z_1s)
 
 
-
-def get_log_z_all(opt_params, key, rb=rb_2, shape=dimer_shape, species=dimer_species): 
+def get_log_z_all(opt_params, key, rb=rb_2, shape=dimer_shape, species=dimer_species):
     dim_energy_fn = get_energy_fns
     zvib = compute_zvib(dim_energy_fn, rb, shape, species, opt_params)
-    e0 = dim_energy_fn(rb, shape, species, opt_params) 
-    boltzmann_weight = jnp.exp(-jnp.clip(e0 / opt_params[3], a_min=-100, a_max=100))  
-    zrot_mod_sigma,_, new_key  = compute_zrot_mod_sigma(dim_energy_fn, rb, shape, species, opt_params, key, 2)
+    e0 = dim_energy_fn(rb, shape, species, opt_params)
+    boltzmann_weight = jnp.exp(-jnp.clip(e0 / opt_params[3], a_min=-100, a_max=100))
+    zrot_mod_sigma, _, new_key = compute_zrot_mod_sigma(
+        dim_energy_fn, rb, shape, species, opt_params, key, 2
+    )
     z = compute_zc(boltzmann_weight, zrot_mod_sigma, zvib)
     z_log = safe_log(z)
     z_log_2 = jnp.array([z_log])
     z_all = jnp.concatenate([log_z_1, z_log_2], axis=0)
     return z_all, new_key
-   
-                                                      
-nper_structure = nper_structure = jnp.array([[0,1,1], [1,0,1]])
+
+
+nper_structure = nper_structure = jnp.array([[0, 1, 1], [1, 0, 1]])
+
 
 def loss_fn(log_concs_struc, log_z_list, opt_params):
     m_conc = opt_params[-n:]
@@ -527,9 +579,9 @@ def ofer(opt_params, key):
     return target_yield, new_key
 
 
-def ofer_grad_fn(opt_params, desired_yield_val, key):
+def ofer_grad_fn(opt_params, key):
     target_yield, new_key = ofer(opt_params, key)
-    loss = (desired_yield_val - jnp.exp(target_yield)) ** 2
+    loss = target_yield
     return loss, new_key
 
 
@@ -545,7 +597,7 @@ def project(params):
 
 num_params = len(init_params)
 mask = jnp.zeros(num_params)
-# mask = mask.at[:3].set(1.0)
+mask = mask.at[:3].set(1.0)
 
 
 def masked_grads(grads):
@@ -557,7 +609,7 @@ params = init_params
 outer_optimizer = optax.adam(1e-2)
 opt_state = outer_optimizer.init(params)
 
-n_outer_iters = 2
+n_outer_iters = 400
 outer_losses = []
 
 use_custom_pairs = True
@@ -577,41 +629,41 @@ param_names += [f"conc_{chr(ord('A') + i)}" for i in range(n)]
 final_results = []
 
 
-desired_yields_range = jnp.array([0.9])
-
-os.makedirs("Agnese", exist_ok=True)
-output_filename = f"Agnese/kbt{init_kT[0]:.2f}.txt"
+os.makedirs("Maximized_agnese", exist_ok=True)
+output_filename = f"Maximized_agnese/kbt{init_kT[0]:.2f}.txt"
+#os.makedirs("Nonmaximized_agnese", exist_ok=True)
+#output_filename = f"Nonmaximized_agnese/kbt{init_kT[0]:.2f}.txt"
 
 with open(output_filename, "w") as f:
-    for des_yield in desired_yields_range:
 
-        for i in tqdm(range(n_outer_iters)):
-            (loss, main_key), grads = our_grad_fn(params, des_yield, main_key)
-            # outer_losses.append(loss)
-            grads = masked_grads(grads)
-            print(f"Iteration {i + 1}: Loss = {loss}")
-            updates, opt_state = outer_optimizer.update(grads, opt_state)
-            params = optax.apply_updates(params, updates)
-            # params = project(params)
-            print("Updated Parameters:")
-            for name, value in {
-                name: params[idx] for idx, name in enumerate(param_names)
-            }.items():
-                print(f"{name}: {value}")
-            print(params)
-            fin_yield, main_key = ofer(params, main_key)
-            fin_yield = jnp.exp(fin_yield)
-            print(f"Desired Yield: {des_yield}, Yield: {fin_yield}")
 
-        final_params = params
+    for i in tqdm(range(n_outer_iters)):
+        (loss, main_key), grads = our_grad_fn(params, main_key)
+        # outer_losses.append(loss)
+        grads = masked_grads(grads)
+        print(f"Iteration {i + 1}: Loss = {loss}")
+        updates, opt_state = outer_optimizer.update(grads, opt_state)
+        params = optax.apply_updates(params, updates)
+        # params = project(params)
+        print("Updated Parameters:")
+        for name, value in {
+            name: params[idx] for idx, name in enumerate(param_names)
+        }.items():
+            print(f"{name}: {value}")
+        print(params)
         fin_yield, main_key = ofer(params, main_key)
-        final_target_yields = jnp.exp(fin_yield)
+        fin_yield = jnp.exp(fin_yield)
+        print(f"Yield: {fin_yield}")
 
-        f.write(
-            f"{des_yield},{final_target_yields},{params[0]},{params[1]},{params[2]}\n"
-        )
-        # f.write(f"{des_yield}, {final_target_yields}, {params[3]}\n")
-        f.flush()
+    final_params = params
+    fin_yield, main_key = ofer(params, main_key)
+    final_target_yields = jnp.exp(fin_yield)
+
+    f.write(
+        f"{final_target_yields},{params[0]},{params[1]},{params[2]}\n"
+    )
+    # f.write(f"{des_yield}, {final_target_yields}, {params[3]}\n")
+    f.flush()
 
 
 print("All results saved.")
