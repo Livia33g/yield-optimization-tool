@@ -582,7 +582,7 @@ def ofer(opt_params, key):
 def ofer_grad_fn(opt_params, key):
     target_yield, new_key = ofer(opt_params, key)
     loss = target_yield
-    return loss, new_key
+    return -loss, new_key
 
 
 def project(params):
