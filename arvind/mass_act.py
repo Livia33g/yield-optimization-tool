@@ -59,7 +59,7 @@ parser.add_argument(
     help="Initial concentration. Default is 0.001.",
 )
 parser.add_argument(
-    "--desired_yield", type=float, default=0.4, help="desired yield of target."
+    "--desired_yield", type=float, default=0.5, help="desired yield of target."
 )
 parser.add_argument(
     "--output", type=str, default="weak_7.txt", help="Output file to save the results."
@@ -171,7 +171,7 @@ init_concs = jnp.full(n, m_conc)
 # init_params = jnp.concatenate([patchy_vals, init_concs])
 # init_params = patchy_vals
 weak_eps = jnp.array([args.eps_weak])
-init_params = jnp.concatenate([patchy_vals, weak_eps])
+init_params = jnp.concatenate([patchy_vals, weak_eps, init_concs])
 
 
 def make_shape(size):
@@ -274,7 +274,7 @@ generated_idx_pairs = generate_idx_pairs(n_species)
 
 def make_tables(opt_params, use_custom_pairs=True, custom_pairs=custom_pairs):
     # morse_eps_table = jnp.full((n_species, n_species), args.eps_weak)
-    morse_eps_table = jnp.full((n_species, n_species), opt_params[-1])
+    morse_eps_table = jnp.full((n_species, n_species), opt_params[-n])
     morse_eps_table = morse_eps_table.at[0, :].set(small_value)
     morse_eps_table = morse_eps_table.at[:, 0].set(small_value)
 
@@ -536,7 +536,7 @@ nper_structure = jnp.array(monomer_counts)
 
 
 def loss_fn(log_concs_struc, log_z_list, opt_params):
-    m_conc = init_concs  # opt_params[-n:] init_concs
+    m_conc = opt_params[-n:]
     log_mon_conc = safe_log(m_conc)
 
     def mon_loss_fn(mon_idx):
@@ -678,13 +678,15 @@ def ofer_grad_fn(opt_params, desired_yield_val):
     )
 
     mass_act_loss_val = mass_act_loss1 * (n + 1) + mass_act_loss2 * (n + 2)
-    mass_act_loss = jnp.sqrt((fin_conc - mass_act_loss_val) ** 2)
+    mass_act_loss = jnp.sqrt((mass_act_loss_val) ** 2)
+    mass_act_loss_log = jnp.log(mass_act_loss)
+
 
     # """
     # loss = jnp.linalg.norm(desired_yield_val - jnp.exp(target_yield))
-    loss = (
+    loss = 50 * (
         jnp.linalg.norm(desired_yield_val - jnp.exp(target_yield))
-        + mass_act_loss  # / 1e10
+        + mass_act_loss_log  # / 1e10
     )
 
     return loss, mass_act_loss
@@ -707,6 +709,10 @@ def normalize_logits(logits, total_concentration):
     # Note: concentrations now sums to total_concentration
     return concentrations
 
+def project(params):
+    conc_min = 1e-6
+    concs = jnp.clip(params[-n:], a_min=conc_min)
+    return jnp.concatenate([params[0:3], concs])
 
 num_params = len(init_params)
 
@@ -722,8 +728,9 @@ our_grad_fn = jit(value_and_grad(ofer_grad_fn, has_aux=True))
 params = init_params
 outer_optimizer = optax.adam(1e-1)
 opt_state = outer_optimizer.init(params)
+mass_act_loss = 0.0
 
-n_outer_iters = 200
+n_outer_iters = 350
 outer_losses = []
 
 
@@ -738,10 +745,14 @@ else:
 param_names += ["Weak Eps"]
 final_results = []
 
+des_yield = args.desired_yield
 
-os.makedirs("mass_law", exist_ok=True)
+os.makedirs("Mass_act_simple", exist_ok=True)
+output_filename = f"Mass_act_simple/EpsConc_desyield{des_yield :.2f}_kbt{kT:.2f}.txt"
+#os.makedirs("Nonmaximized_agnese", exist_ok=True)
+#output_filename = f"Nonmaximized_agnese/kbt{init_kT[0]:.2f}.txt"
 
-with open("mass_law/output_file", "w") as f:
+with open(output_filename, "w") as f:
 
     for i in tqdm(range(n_outer_iters)):
         (loss, mass_act_loss), grads = our_grad_fn(params, args.desired_yield)
@@ -749,9 +760,13 @@ with open("mass_law/output_file", "w") as f:
         print(f"Mass action loss: {mass_act_loss}")
         print(f"Gradients: {grads}")
 
-        # grads = masked_grads(grads)
         updates, opt_state = outer_optimizer.update(grads, opt_state)
         params = optax.apply_updates(params, updates)
+        conc_params = normalize_logits
+        params = abs_array(params)
+        norm_conc = normalize_logits(params[-n:], init_conc)
+        params = jnp.concatenate([params[:-n], norm_conc])
+        params = project(params)
         # params = project(params)
         print("Updated Parameters:")
         for name, value in {
@@ -766,8 +781,10 @@ with open("mass_law/output_file", "w") as f:
     final_params = params
     fin_yield = ofer(params)
     final_target_yields = jnp.exp(fin_yield)
+    final_mass_act_loss = mass_act_loss
+
 
     f.write(
-        f"{args.desired_yield},{final_target_yields},{params[0]},{params[1]},{params[-1]}\n"
+        f"{args.desired_yield},{final_target_yields},{params[0]},{params[1]},{params[2]},{params[3]},{params[4]},{params[5]},{final_mass_act_loss}\n"
     )
     f.flush()
