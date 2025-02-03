@@ -45,6 +45,3 @@ if __name__ == "__main__":
     input_file = "arvind_43.pkl"  # Path to the file containing all species data
     output_file = "tetramers.pkl"  # File to save tetramer-specific data
     extract_tetramer_info(input_file, output_file)
-
-
-
