@@ -32,6 +32,7 @@ import gc
 import os
 import networkx as nx
 from itertools import product 
+import argparse
 
 SEED = 42
 main_key = random.PRNGKey(SEED)
@@ -108,8 +109,38 @@ target_idx = indx_of_target(target, species_data)
 
 euler_scheme = "sxyz"
 
+parser = argparse.ArgumentParser(description="Simulation with adjustable parameters.")
+parser.add_argument(
+    "--eps_weak",
+    type=float,
+    default=1.0,
+    help="weak epsilon values (attraction strengths).",
+)
+parser.add_argument(
+    "--eps_init",
+    type=float,
+    default=6.,
+    help="init strong epsilon values (attraction strengths).",
+)
+parser.add_argument(
+    "--kt", type=float, default=1.0, help="Thermal energy (kT). Default is 1.0."
+)
+parser.add_argument(
+    "--init_conc",
+    type=float,
+    default=0.001,
+    help="Initial concentration. Default is 0.001.",
+)
+parser.add_argument(
+    "--desired_yield", type=float, default=0.4, help="desired yield of target."
+)
+
+args = parser.parse_args()
+
+
+
 V =  54000.0
-kT = 1.0
+kT = args.kt
 n = num_monomers  
 
 # Shape and energy helper functions
@@ -128,12 +159,12 @@ n_morse_vals = (
     n_patches * (n_patches - 1) // 2 + n_patches
 )  # all possible pair permutations plus same patch attraction (i,i)
 patchy_vals = jnp.full(
-    n-1, 7.0
-)  # FIXME for optimization over specific attraction strengths
+    n-1, args.eps_init) # FIXME for optimization over specific attraction strengths
 
-init_conc = 0.001/n
+init_conc = args.init_conc/n
 init_concs = jnp.full(n, init_conc)
-init_params = jnp.concatenate([patchy_vals, init_concs])
+weak_eps = jnp.array([args.eps_weak])
+init_params = jnp.concatenate([patchy_vals, weak_eps, init_concs])
 
 
 def make_shape(size):
@@ -233,10 +264,8 @@ def generate_idx_pairs(n_species):
 generated_idx_pairs = generate_idx_pairs(n_species)
 
 
-def make_tables(
-    opt_params, use_custom_pairs=True, custom_pairs=custom_pairs
-):
-    morse_eps_table = jnp.full((n_species, n_species), 5.0)
+def make_tables(opt_params, use_custom_pairs=True, custom_pairs=custom_pairs):
+    morse_eps_table = jnp.full((n_species, n_species), opt_params[2])
     morse_eps_table = morse_eps_table.at[0, :].set(small_value)
     morse_eps_table = morse_eps_table.at[:, 0].set(small_value)
 
@@ -259,6 +288,7 @@ def make_tables(
             )
 
     return morse_eps_table
+
 
 
 def pairwise_morse(ipos, jpos, i_species, j_species, opt_params):
@@ -334,7 +364,7 @@ def hess(energy_fn, q, pos, species, opt_params):
 
 def compute_zvib(energy_fn, q, pos, species, opt_params):
     evals, evecs = hess(energy_fn, q, pos, species, opt_params)
-    zvib = jnp.prod(jnp.sqrt(2.0 * jnp.pi / (jnp.abs(evals[6:]) + 1e-12)))
+    zvib = jnp.prod(jnp.sqrt(2.0 * jnp.pi / (kT * jnp.abs(evals[6:]) + 1e-12)))
     return zvib
 
 
@@ -539,7 +569,7 @@ def inner_solver(init_guess, log_z_list, opt_params):
 #########################
 
 def ofer(opt_params):
-    log_z_list = get_log_z_all(opt_params[:-n])
+    log_z_list = get_log_z_all(opt_params[:n])
     tot_conc = init_conc
     struc_concs_guess = jnp.full(tot_num_structures, safe_log(tot_conc / tot_num_structures))
     fin_log_concs = inner_solver(struc_concs_guess, log_z_list, opt_params)
@@ -559,13 +589,6 @@ def ofer_grad_max(opt_params):
     loss = - target_yield
     return loss
 
-
-def project(params):
-    conc_min = 1e-6
-    concs = jnp.clip(params[-n:], a_min=conc_min)
-    return jnp.concatenate([params[:-n], concs])
-
-
 def abs_array(par):
     return jnp.abs(par)
 
@@ -577,19 +600,26 @@ def normalize(arr):
 
 
 def normalize_logits(logits, total_concentration):
-    norm_logits = normalize(logits) 
+    norm_logits = normalize(logits)
 
     concentrations = norm_logits * total_concentration
     # Note: concentrations now sums to total_concentration
     return concentrations
 
+
 num_params = len(init_params)
 
-mask = jnp.full(num_params, 0.)
-mask = mask.at[:-n].set(1.)
+mask = jnp.full(num_params, 0.0)
+#mask = mask.at[-n:].set(1.0)
+
 
 def masked_grads(grads):
     return grads * mask
+
+def project(params):
+    conc_min = 1e-6
+    concs = jnp.clip(params[-n:], a_min=conc_min)
+    return jnp.concatenate([params[0:n], concs])
 
 our_grad_fn = jit(value_and_grad(ofer_grad_fn, has_aux=False))
 our_grad_max = jit(value_and_grad(ofer_grad_max, has_aux=False))
@@ -599,7 +629,7 @@ print("init params are:", params)
 outer_optimizer = optax.adam(1e-2)
 opt_state = outer_optimizer.init(params)
 
-n_outer_iters = 450
+n_outer_iters = 2
 outer_losses = []
 
 if use_custom_pairs and custom_pairs is not None:
@@ -618,7 +648,6 @@ final_results = []
     
 #desired_yields_range = jnp.arange(0.1,0.3, 0.1)
 
-desired_yields_range = jnp.array([0.9, 1.0])
 
 """  
 for i in tqdm(range(n_outer_iters)):
@@ -646,58 +675,46 @@ for i in tqdm(range(n_outer_iters)):
     print(f"Yield: {fin_yield}")
 
 """    
-    
-    
-    
-with open("trimer_91txt", "w") as final_results_file:
-    for desired_yield in desired_yields_range:
-        for i in tqdm(range(n_outer_iters)):
-            # Compute loss and gradients 
-            loss, grads = our_grad_fn(params, desired_yield)
-            grads = masked_grads(grads)
+desired_yield = args.desired_yield
+
+directory_name = "Arvind_Stoc"
+#file_name = f"yield_{desired_yield}_kt{kT}.txt"  
+file_name = f"kt{kT}_epsS_6_epsW_1.txt"
+output_file_path = os.path.join(directory_name, file_name)
+
+# Ensure the directory exists
+
+os.makedirs(directory_name, exist_ok=True)
+with open(output_file_path, "w") as f:
+
+    for i in tqdm(range(n_outer_iters)):
+        loss, grads = our_grad_fn(params, args.desired_yield)
+        #loss, grads = our_grad_max(params)
+        grads = masked_grads(grads)
+        print(f"Iteration {i + 1}, Loss: {loss}")    
             
-            # Print loss and gradients
-            print(f"Iteration {i + 1}: Loss = {loss}")
-            
-            # Update parameters and print updated parameters
-            updates, opt_state = outer_optimizer.update(grads, opt_state)
-            params = optax.apply_updates(params, updates)
-            params = abs_array(params)
-            norm_conc = normalize_logits(params[-n:], 0.001)
-            params = jnp.concatenate([params[:-n], norm_conc])
-            params = project(params)
-            print("Updated Parameters:")
-            #for name, value in {name: params[idx] for idx, name in enumerate(param_names)}.items():
-               # print(f"{name}: {value}")
-            print(params)
-
-            # Compute yield (assuming fin_yield is defined here)
-            fin_yield = jnp.exp(ofer(params))   
-            print(f"Yield: {fin_yield}")
-
-        # After the inner loop (for each desired_yield), save final params and yield to the file
-        final_params = params
-        final_target_yields = jnp.exp(ofer(final_params))
-
-        final_params_dict = {name: final_params[idx] for idx, name in enumerate(param_names)}
-
-        # Write the final results for this desired_yield
-        final_results_file.write(f"Desired Yield: {desired_yield}\n")
-        final_results_file.write("Final Optimized Parameters:\n")
-        for name, value in final_params_dict.items():
-            final_results_file.write(f"{name}: {value}\n")
-        final_results_file.write(f"Final Loss: {loss}\n")
-        final_results_file.write(f"Final Target Yields: {final_target_yields}\n\n")
-        
-        # Flush the file to ensure the results are saved immediately
-        final_results_file.flush()
-
-        # Print final results for confirmation
-        print(f"Final Results for Desired Yield {desired_yield}:")
-        for name, value in final_params_dict.items():
+        updates, opt_state = outer_optimizer.update(grads, opt_state)
+        params = optax.apply_updates(params, updates)
+        conc_params = normalize_logits
+        params = abs_array(params)
+        norm_conc = normalize_logits(params[-n:], args.init_conc)
+        params = jnp.concatenate([params[:-n], norm_conc])
+        params = project(params)
+        print("Updated Parameters:")
+        for name, value in {
+            name: params[idx] for idx, name in enumerate(param_names)
+        }.items():
             print(f"{name}: {value}")
-        print(f"Final Loss: {loss}")
-        print(f"Final Target Yields: {final_target_yields}\n")
+        print(params)
+        fin_yield = ofer(params)
+        fin_yield = jnp.exp(fin_yield)
+        print(f"Desired Yield: {args.desired_yield}, Final Yield: {fin_yield}")
 
-print("All results saved.")
-print(f"Number of params: {len(params)}")
+    final_params = params
+    fin_yield = ofer(params)
+    final_target_yields = jnp.exp(fin_yield)
+
+    f.write(
+        f"{args.desired_yield},{final_target_yields},{params[0]},{params[1]},{params[2]},{params[3]},{params[4]},{params[5]}\n"
+    )
+    f.flush()

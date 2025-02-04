@@ -701,7 +701,7 @@ def ofer_grad_fn(opt_params, desired_yield_val):
     mass_act_loss = jnp.sum(mass_act_loss_logs(opt_params, jnp.arange(species_tetr.shape[0])))
 
     # loss = jnp.linalg.norm(desired_yield_val - jnp.exp(target_yield))
-    loss = 10000 * (abs(jnp.log(desired_yield_val)- target_yield))**2 + mass_act_loss
+    loss = 100 * (abs(jnp.log(desired_yield_val)- target_yield))**2 + mass_act_loss
     
     #loss = (abs(jnp.log(desired_yield_val)- target_yield))**2
 
@@ -746,7 +746,7 @@ params = init_params
 outer_optimizer = optax.adam(1e-2)
 opt_state = outer_optimizer.init(params)
 
-n_outer_iters = 400
+n_outer_iters = 500
 outer_losses = []
 
 
@@ -767,8 +767,8 @@ final_results = []
 
 desired_yield = args.desired_yield
 
-directory_name = "Mass_act_simple"
-file_name = f"output_{desired_yield}_kt{kT}.txt"  # File name includes desired_yield
+directory_name = "Mass_true_simple"
+file_name = f"yield_{desired_yield}_kt{kT}.txt"  # File name includes desired_yield
 output_file_path = os.path.join(directory_name, file_name)
 
 # Ensure the directory exists
@@ -786,7 +786,7 @@ with open(output_file_path, "w") as f:
         params = optax.apply_updates(params, updates)
         conc_params = normalize_logits
         params = abs_array(params)
-        norm_conc = normalize_logits(params[-n:], 0.001)
+        norm_conc = normalize_logits(params[-n:], args.init_conc)
         params = jnp.concatenate([params[:-n], norm_conc])
         params = project(params)
         # params = project(params)
@@ -808,5 +808,3 @@ with open(output_file_path, "w") as f:
         f"{args.desired_yield},{final_target_yields},{params[0]},{params[1]},{params[2]},{params[3]},{params[4]},{params[5]}\n"
     )
     f.flush()
-
-
