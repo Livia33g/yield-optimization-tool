@@ -664,6 +664,17 @@ def ofer(opt_params):
     return target_yield, fin_concs[:n], fin_concs.sum()
 
 
+sizes_mass_jnp = jnp.array(
+    sizes_mass_list
+)  # Ensure sizes_mass_list is a JAX array for vmap
+
+# Pre-calculate amount_of_strucs values *outside* the JAX function as a JAX array
+amount_of_strucs_array = jnp.array(
+    onp.array([data_tetr[f"{size}_amount_structures"] for size in sizes_mass_list])
+)
+
+
+# @jit #Move outside if you want debugging statements
 def ofer_grad_fn(opt_params, desired_yield_val):
     target_yield, mon_concs, fin_conc = ofer(opt_params)
 
@@ -676,13 +687,14 @@ def ofer_grad_fn(opt_params, desired_yield_val):
         onp.array([data_tetr[f"{size}_amount_structures"] for size in sizes_mass_list])
     )
 
-    # pdb.set_trace()
+    # pdb.set_trace()  # Move debugging out of JITed functions!
 
     def log_massact_loss_fn_for_size(
-        size_index, opt_params, amount_of_strucs
-    ):  # Take size_index and amount_of_strucs
+        size_index, opt_params
+    ):  #Only pass in size_index
         size_concrete = sizes_mass_jnp[size_index]  # Get concrete size using size_index
-        # amount_of_strucs = amount_of_strucs_array[size_index] # Get amount_of_strucs using size_index - passed as argument now
+        amount_of_strucs = amount_of_strucs_array[size_index] #NOW, get amount of strucs using size_index
+
 
         print(
             f"Debugging in log_massact_loss_fn: size = {size_concrete}, amount_of_strucs = {amount_of_strucs}"
@@ -690,12 +702,17 @@ def ofer_grad_fn(opt_params, desired_yield_val):
 
         def mini_loss(struc_inx):
             def mon_prod(mon_idx):
-                size_concrete_int = int(
-                    size_concrete
-                )  # Convert to concrete Python integer
-                count = monomer_counts_mass[mon_idx][str(size_concrete_int)][struc_inx]
+                # size_concrete_int = int(size_concrete)  # NO! Don't convert to int
+                # Ensure monomer_counts_mass[mon_idx] is a JAX array-like structure for this to work
+                try:
+                    count = monomer_counts_mass[mon_idx][size_concrete][struc_inx]
+                except Exception as e:
+                    print(f"Error accessing monomer_counts_mass: {e}")
+                    print(f"mon_idx: {mon_idx}, size_concrete: {size_concrete}, struc_inx: {struc_inx}")
+                    raise  # Re-raise the exception to stop execution
 
-                count = monomer_counts_mass[mon_idx][str(size_concrete)][struc_inx]
+                #count = monomer_counts_mass[mon_idx][str(size_concrete)][struc_inx]
+
                 return count * safe_log(mon_concs[mon_idx])
 
             presum_mons = vmap(mon_prod)(jnp.arange(n))
@@ -714,23 +731,21 @@ def ofer_grad_fn(opt_params, desired_yield_val):
             )  # Use size_concrete here
             return struc_mass_loss
 
-        all_size_mass_losses = vmap(mini_loss)(amount_of_strucs_array)
-        pdb.set_trace()
+        all_size_mass_losses = vmap(mini_loss)(jnp.arange(amount_of_strucs)) #Pass the range of amount of structures here
+        # pdb.set_trace()  #Debugging statment
         return jnp.sum(all_size_mass_losses)
 
     # Vectorize over size_index using vmap, passing both size_index and amount_of_strucs_array
     size_indices_for_vmap = jnp.arange(len(sizes_mass_jnp))  # JAX array of indices
-    loss_per_size = vmap(log_massact_loss_fn_for_size, in_axes=(0, None, 0))(
+    loss_per_size = vmap(log_massact_loss_fn_for_size, in_axes=(0, None))(
         size_indices_for_vmap,
-        opt_params,
-        amount_of_strucs_array,  # Pass amount_of_strucs_array here
+        opt_params # Pass only opt params now
     )
 
     tot_mass_loss = jnp.sum(loss_per_size)  # Sum up losses across all sizes
 
     loss = 10000 * (abs(jnp.log(desired_yield_val) - target_yield)) ** 2 + tot_mass_loss
     return loss, safe_exp(tot_mass_loss)
-
 
 def abs_array(par):
     return jnp.abs(par)
