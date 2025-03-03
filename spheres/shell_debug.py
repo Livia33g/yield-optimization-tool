@@ -35,14 +35,55 @@ import jax.numpy as jnp
 import unittest
 from scipy.spatial import distance_matrix
 
+import argparse
+
+# -------------------------
+# Parse command-line arguments
+# -------------------------
+parser = argparse.ArgumentParser(
+    description="Run the rigid-body simulation with adjustable parameters."
+)
+parser.add_argument(
+    "--init_temp",
+    type=float,
+    default=0.5,
+    help="Initial temperature (kbT) value. [default: 0.5]",
+)
+parser.add_argument(
+    "--init_morse",
+    type=float,
+    default=1.0,
+    help="Initial Morse epsilon parameter. [default: 1.0]",
+)
+parser.add_argument(
+    "--init_conc",
+    type=float,
+    default=0.001,
+    help="Initial concentration. [default: 0.001]",
+)
+parser.add_argument(
+    "--number_mon",
+    type=int,
+    default=343,
+    help="Number of monomers (structures) to simulate. [default: 12]",
+)
+parser.add_argument(
+    "--desired_yield",
+    type=float,
+    default=0.9,
+    help="Desired yield value. [default: 0.9]",
+)
+args = parser.parse_args()
+
+
 euler_scheme = "sxyz"
-V = 54000.0
+V = args.number_mon * args.init_conc
 
 SEED = 42
 main_key = random.PRNGKey(SEED)
 
 init_params = jnp.array(
-    [1.0, 2.5, 1e-12, 1.0, 1.0]
+    [args.init_morse, 2.5, 500, 5.0, args.init_temp]
 )  # morse_eps, morse_alpha, rep_A, rep_alpha, kbT
 displacement_fn, shift_fn = space.free()
 
@@ -543,7 +584,7 @@ def loss_fn(log_concs_struc, log_z_list):
 
         return loss
 
-    struc_loss = vmap(struc_loss_fn)(jnp.arange(1, 12))
+    struc_loss = vmap(struc_loss_fn)(jnp.arange(1, 13))
     combined_loss = jnp.concatenate(
         [jnp.array([mon_loss]), struc_loss]
     )  # Add mon_loss to combined_loss as a 1D array
@@ -611,7 +652,7 @@ params = init_params
 outer_optimizer = optax.adam(1e-2)
 opt_state = outer_optimizer.init(params)
 
-n_outer_iters = 200
+n_outer_iters = 600
 outer_losses = []
 
 
@@ -622,38 +663,36 @@ param_names += [f"rep_alpha"]
 param_names += [f"kbT"]
 
 
-desired_yields_range = jnp.array([0.1, 0.2])
+desired_yield_val = args.desired_yield
 
+os.makedirs("fixed_Eps", exist_ok=True)
 
-os.makedirs("Temp", exist_ok=True)
+with open(f"fixed_Eps/{desired_yield_val}.txt", "w") as f:
 
-with open("Temp/temp_12.txt", "w") as f:
-    for des_yield in desired_yields_range:
-
-        for i in tqdm(range(n_outer_iters)):
-            loss, grads = our_grad_fn(params, des_yield)
-            # outer_losses.append(loss)
-            grads = masked_grads(grads)
-            updates, opt_state = outer_optimizer.update(grads, opt_state)
-            params = optax.apply_updates(params, updates)
-            # params = project(params)
-            print("Updated Parameters:")
-            for name, value in {
-                name: params[idx] for idx, name in enumerate(param_names)
-            }.items():
-                print(f"{name}: {value}")
-            print(params)
-            fin_yield = ofer(params)
-            fin_yield = jnp.exp(fin_yield)
-            print(f"Desired Yield: {des_yield}, Yield: {fin_yield}")
-
-        final_params = params
+    for i in tqdm(range(n_outer_iters)):
+        loss, grads = our_grad_fn(params, desired_yield_val)
+        # outer_losses.append(loss)
+        grads = masked_grads(grads)
+        updates, opt_state = outer_optimizer.update(grads, opt_state)
+        params = optax.apply_updates(params, updates)
+        # params = project(params)
+        print("Updated Parameters:")
+        for name, value in {
+            name: params[idx] for idx, name in enumerate(param_names)
+        }.items():
+            print(f"{name}: {value}")
+        print(params)
         fin_yield = ofer(params)
-        final_target_yields = jnp.exp(fin_yield)
+        fin_yield = jnp.exp(fin_yield)
+        print(f"Desired Yield: {desired_yield_val}, Yield: {fin_yield}")
 
-        f.write(f"{des_yield},{final_target_yields},{params[-1]}\n")
-        # f.write(f"{des_yield}, {final_target_yields}, {params[0]}, {params[-1]}\n")
-        f.flush()
+    final_params = params
+    fin_yield = ofer(params)
+    final_target_yields = jnp.exp(fin_yield)
+
+    f.write(f"{desired_yield_val},{final_target_yields},{params[-1]}\n")
+    # f.write(f"{des_yield}, {final_target_yields}, {params[0]}, {params[-1]}\n")
+    f.flush()
 
 
 print("All results saved.")
