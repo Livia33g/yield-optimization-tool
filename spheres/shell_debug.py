@@ -44,7 +44,7 @@ parser = argparse.ArgumentParser(
     description="Run the rigid-body simulation with adjustable parameters."
 )
 parser.add_argument(
-    "--init_temp",
+    "--kt",
     type=float,
     default=0.5,
     help="Initial temperature (kbT) value. [default: 0.5]",
@@ -52,7 +52,7 @@ parser.add_argument(
 parser.add_argument(
     "--init_morse",
     type=float,
-    default=1.0,
+    default=1000.0,
     help="Initial Morse epsilon parameter. [default: 1.0]",
 )
 parser.add_argument(
@@ -83,7 +83,7 @@ SEED = 42
 main_key = random.PRNGKey(SEED)
 
 init_params = jnp.array(
-    [args.init_morse, 2.5, 500, 5.0, args.init_temp]
+    [args.init_morse, 2.5, 500.0, 5.0, args.kt]
 )  # morse_eps, morse_alpha, rep_A, rep_alpha, kbT
 displacement_fn, shift_fn = space.free()
 
@@ -558,7 +558,8 @@ def get_log_z_all(opt_params):
 
 
 nper_structure = jnp.arange(1, 13)
-init_conc = jnp.array([0.001])
+init_conc_val = args.init_conc
+init_conc = jnp.array([init_conc_val])
 
 
 def loss_fn(log_concs_struc, log_z_list):
@@ -597,6 +598,13 @@ def loss_fn(log_concs_struc, log_z_list):
     return tot_loss, combined_loss, loss_var
 
 
+def safe_exp(x, lower_bound=-709.0, upper_bound=709.0):
+
+    clipped_x = jnp.clip(x, a_min=lower_bound, a_max=upper_bound)
+
+    return jnp.exp(clipped_x)
+
+
 def optimality_fn(log_concs_struc, log_z_list):
     return grad(
         lambda log_concs_struc, log_z_list: loss_fn(log_concs_struc, log_z_list)[0]
@@ -620,27 +628,35 @@ def inner_solver(init_guess, log_z_list):
     return final_params
 
 
+def safe_log(x, eps=1e-10):
+    return jnp.log(jnp.clip(x, a_min=eps, a_max=None))
+
+
 def ofer(opt_params):
     log_z_list = get_log_z_all(opt_params)
-    tot_conc = init_conc
-    struc_concs_guess = jnp.full(12, jnp.log(0.001 / 12))
+    tot_conc = init_conc_val
+    struc_concs_guess = jnp.full(12, safe_log(init_conc_val / 12))
     fin_log_concs = inner_solver(struc_concs_guess, log_z_list)
-    fin_concs = jnp.exp(fin_log_concs)
+    fin_concs = safe_exp(fin_log_concs)
+    # target_yield = fin_concs[-1] - jnp.sum(jnp.log(init_conc))
     yields = fin_concs / jnp.sum(fin_concs)
-    target_yield = jnp.log(yields[-1])
+    target_yield = safe_log(yields[-1])
     return target_yield
 
 
 def ofer_grad_fn(opt_params, desired_yield_val):
     target_yield = ofer(opt_params)
-    loss = jnp.linalg.norm(desired_yield_val - jnp.exp(target_yield))
+    # loss = jnp.linalg.norm(jnp.log(desired_yield_val) - target_yield)
+    # loss = (abs(jnp.log(desired_yield_val) - target_yield))**2
+    loss = (-target_yield) ** (1 / 5)
     return loss
 
 
 num_params = len(init_params)
 mask = jnp.zeros(num_params)
 # mask = mask.at[0].set(1.0)
-mask = mask.at[-1].set(1.0)
+# mask = mask.at[-1].set(1.0)
+mask = mask.at[0].set(1.0)
 
 
 def masked_grads(grads):
@@ -649,10 +665,10 @@ def masked_grads(grads):
 
 our_grad_fn = jit(value_and_grad(ofer_grad_fn, has_aux=False))
 params = init_params
-outer_optimizer = optax.adam(1e-2)
+outer_optimizer = optax.adam(1e-3)
 opt_state = outer_optimizer.init(params)
 
-n_outer_iters = 600
+n_outer_iters = 300
 outer_losses = []
 
 
@@ -665,9 +681,9 @@ param_names += [f"kbT"]
 
 desired_yield_val = args.desired_yield
 
-os.makedirs("fixed_Eps", exist_ok=True)
-
-with open(f"fixed_Eps/{desired_yield_val}.txt", "w") as f:
+os.makedirs("Fixed_kt", exist_ok=True)
+kt_val = args.kt
+with open(f"Fixed_kt/{kt_val}.txt", "w") as f:
 
     for i in tqdm(range(n_outer_iters)):
         loss, grads = our_grad_fn(params, desired_yield_val)
@@ -690,7 +706,7 @@ with open(f"fixed_Eps/{desired_yield_val}.txt", "w") as f:
     fin_yield = ofer(params)
     final_target_yields = jnp.exp(fin_yield)
 
-    f.write(f"{desired_yield_val},{final_target_yields},{params[-1]}\n")
+    f.write(f"{desired_yield_val},{final_target_yields},{params[0],}{params[-1]}\n")
     # f.write(f"{des_yield}, {final_target_yields}, {params[0]}, {params[-1]}\n")
     f.flush()
 

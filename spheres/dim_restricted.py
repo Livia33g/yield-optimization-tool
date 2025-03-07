@@ -44,7 +44,7 @@ parser = argparse.ArgumentParser(
     description="Run the rigid-body simulation with adjustable parameters."
 )
 parser.add_argument(
-    "--init_temp",
+    "--kt",
     type=float,
     default=0.5,
     help="Initial temperature (kbT) value. [default: 0.5]",
@@ -76,16 +76,14 @@ parser.add_argument(
 args = parser.parse_args()
 
 
-
-
 euler_scheme = "sxyz"
-V =  args.number_mon * args.init_conc
+V = args.number_mon * args.init_conc
 
 SEED = 42
 main_key = random.PRNGKey(SEED)
 
 init_params = jnp.array(
-    [args.init_morse, 2.5, 500, 5.0, args.init_temp]
+    [args.init_morse, 2.5, 500, 5.0, args.kt]
 )  # morse_eps, morse_alpha, rep_A, rep_alpha, kbT
 displacement_fn, shift_fn = space.free()
 
@@ -435,14 +433,14 @@ def compute_zc(boltzmann_weight, z_rot_mod_sigma, z_vib, sigma, V=V):
 sigmas_ext = load_sigmas("symmetry_numbers.txt")
 sigmas = adjust_sigmas(sigmas_ext)
 
-list_size = [1,2,12]
+list_size = [1, 2, 12]
 
 full_shell_coord = load_rb_orientation_vec(file_paths)[0]
 # print(full_shell_coord)
 # print(full_shell_coord.shape)
 adj_ma = are_blocks_connected_rb(full_shell_coord)
 all_rbs = generate_connected_subsets_rb(full_shell_coord, adj_ma)
-rbs = [rbs[i] for i in [0, 1, 11]]
+rbs = [all_rbs[i] for i in [0, 1, 11]]
 rbs = [rb.flatten() for rb in rbs]
 shapes_species = [get_icos_shape_and_species(size) for size in list_size]
 shapes, species = zip(*shapes_species)
@@ -516,9 +514,9 @@ log_z_1 = jnp.log(z_1)
 
 zrot_mod_sigma_values = []
 
-for size in [1,2]:
+for size in [1, 2]:
+    en_size = list_size[size]
     zrot_mod_sigma, Js, main_key = compute_zrot_mod_sigma(
-        en_size = list_size[size]
         energy_fns[en_size],
         rbs[size],
         shapes[size],
@@ -551,7 +549,7 @@ def get_log_z_all(opt_params):
 
     log_z_struc = []
 
-    for size in range(2, 12 + 1):
+    for size in [1, 2]:
         log_z = compute_log_z(size)
         log_z_struc.append(log_z)
 
@@ -563,7 +561,7 @@ def get_log_z_all(opt_params):
     return log_z_all
 
 
-nper_structure = jnp.array([1,2,12])
+nper_structure = jnp.array([1, 2, 12])
 init_conc = jnp.array([0.001])
 
 
@@ -620,33 +618,45 @@ def inner_solver(init_guess, log_z_list):
 
     final_params = sol.params
     final_loss, combined_losses, _ = loss_fn(final_params, log_z_list)
-    #max_loss = jnp.max(combined_losses)
-    #second_max_loss = jnp.partition(combined_losses, -2)[-2]
+    # max_loss = jnp.max(combined_losses)
+    # second_max_loss = jnp.partition(combined_losses, -2)[-2]
 
     return final_params
+
+
+def safe_log(x, eps=1e-10):
+    return jnp.log(jnp.clip(x, a_min=eps, a_max=None))
+
+
+def safe_exp(x, lower_bound=-709.0, upper_bound=709.0):
+
+    clipped_x = jnp.clip(x, a_min=lower_bound, a_max=upper_bound)
+
+    return jnp.exp(clipped_x)
 
 
 def ofer(opt_params):
     log_z_list = get_log_z_all(opt_params)
     tot_conc = init_conc
-    struc_concs_guess = jnp.full(12, jnp.log(0.001 / 12))
+    struc_concs_guess = jnp.full(3, jnp.log(0.001 / 3))
     fin_log_concs = inner_solver(struc_concs_guess, log_z_list)
-    fin_concs = jnp.exp(fin_log_concs)
+    fin_concs = safe_exp(fin_log_concs)
     yields = fin_concs / jnp.sum(fin_concs)
-    target_yield = jnp.log(yields[-1])
+    target_yield = safe_log(yields[-1])
     return target_yield
 
 
 def ofer_grad_fn(opt_params, desired_yield_val):
     target_yield = ofer(opt_params)
-    loss = jnp.linalg.norm(desired_yield_val - jnp.exp(target_yield))
+    # loss = (jnp.log(desired_yield_val) - target_yield)**2
+    loss = -((target_yield) ** (1 / 5))
     return loss
 
 
 num_params = len(init_params)
 mask = jnp.zeros(num_params)
-#mask = mask.at[0].set(1.0)
-mask = mask.at[-1].set(1.0)
+mask = mask.at[0].set(1.0)
+# mask = mask.at[-1].set(1.0)
 
 
 def masked_grads(grads):
@@ -655,10 +665,10 @@ def masked_grads(grads):
 
 our_grad_fn = jit(value_and_grad(ofer_grad_fn, has_aux=False))
 params = init_params
-outer_optimizer = optax.adam(1e-2)
+outer_optimizer = optax.adam(1e-3)
 opt_state = outer_optimizer.init(params)
 
-n_outer_iters = 600
+n_outer_iters = 100
 outer_losses = []
 
 
@@ -670,19 +680,22 @@ param_names += [f"kbT"]
 
 
 desired_yield_val = args.desired_yield
+kt_val = args.kt
+os.makedirs("Res_fixed_Temp", exist_ok=True)
 
-os.makedirs("Res_fixed_Eps", exist_ok=True)
-
-with open(f"Res_fixed_Eps/{desired_yield_val}.txt", "w") as f:
+with open(f"Res_fixed_Temp/{kt_val}.txt", "w") as f:
 
     for i in tqdm(range(n_outer_iters)):
         loss, grads = our_grad_fn(params, desired_yield_val)
+        print("loss", loss)
+        print("grads", grads)
         # outer_losses.append(loss)
         grads = masked_grads(grads)
         updates, opt_state = outer_optimizer.update(grads, opt_state)
         params = optax.apply_updates(params, updates)
         # params = project(params)
         print("Updated Parameters:")
+        print("params", params)
         for name, value in {
             name: params[idx] for idx, name in enumerate(param_names)
         }.items():
