@@ -34,6 +34,10 @@ import numpy as np
 import jax.numpy as jnp
 import unittest
 from scipy.spatial import distance_matrix
+from jax import debug
+
+config.update("jax_disable_jit", True)
+
 
 import argparse
 
@@ -83,7 +87,7 @@ SEED = 42
 main_key = random.PRNGKey(SEED)
 
 init_params = jnp.array(
-    [args.init_morse, 2.5, 500.0, 5.0, args.kt]
+    [args.init_morse, 2.5, 1.0, 5.0, args.kt]
 )  # morse_eps, morse_alpha, rep_A, rep_alpha, kbT
 displacement_fn, shift_fn = space.free()
 
@@ -619,6 +623,7 @@ def inner_solver(init_guess, log_z_list):
         implicit_diff=True,
     )
     sol = gd.run(init_guess, log_z_list)
+    pdb.set_trace()
 
     final_params = sol.params
     final_loss, combined_losses, _ = loss_fn(final_params, log_z_list)
@@ -630,6 +635,16 @@ def inner_solver(init_guess, log_z_list):
 
 def safe_log(x, eps=1e-10):
     return jnp.log(jnp.clip(x, a_min=eps, a_max=None))
+
+
+pdb.set_trace()
+
+
+log_z_list = get_log_z_all(init_params)
+tot_conc = init_conc_val
+struc_concs_guess = jnp.full(12, safe_log(init_conc_val / 12))
+fin_log_concs = inner_solver(struc_concs_guess, log_z_list)
+pdb.set_trace()
 
 
 def ofer(opt_params):
