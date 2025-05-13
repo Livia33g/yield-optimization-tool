@@ -23,7 +23,7 @@ block_until_ready)
 import sys
 sys.stdout.flush()
 import optax
-from jaxopt import implicit_diff, GradientDescent
+from jaxopt import implicit_diff, GradientDescent, LBFGS
 from checkpoint import checkpoint_scan
 import functools
 import jax.numpy as jnp
@@ -47,20 +47,12 @@ from jax import debug
 import argparse
 from jax.scipy.special import logsumexp
 
-# --- Helper function to force evaluation (unwrap tracers) ---
-def pr(x):
-    """Force evaluation and convert x to a NumPy array."""
-    return np.array(device_get(block_until_ready(x)))
-
-# -------------------------
-# Parse command-line arguments
-# -------------------------
 parser = argparse.ArgumentParser(
     description="Run the rigid-body simulation with adjustable parameters."
 )
 # Using new defaults so that typical free energy differences are more moderate.
-parser.add_argument("--kt", type=float, default=.7, help="Initial temperature (kbT)")
-parser.add_argument("--init_morse", type=float, default=5.0, help="Initial Morse epsilon")
+parser.add_argument("--kt", type=float, default=1., help="Initial temperature (kbT)")
+parser.add_argument("--init_morse", type=float, default=1.0, help="Initial Morse epsilon")
 parser.add_argument("--init_conc", type=float, default=0.001, help="Initial concentration")
 parser.add_argument("--number_mon", type=int, default=343, help="Number of monomers")
 parser.add_argument("--desired_yield", type=float, default=1.0, help="Desired yield")
@@ -294,14 +286,14 @@ def load_sigmas(file_path):
             shell, sigma_str = line.strip().split(",")
             size_str = shell.split("_")[-1]
             size = int(size_str.replace("size", "").replace(".pos", ""))
-            sigmas[size] = float(sigma_str)   # ← cast to float here
+            sigmas[size] = float(sigma_str)   
     return sigmas
 
 def adjust_sigmas(sigmas):
     adjusted_sigmas = {}
-    for size, sigma in sigmas.items():           # now sigma is a float
+    for size, sigma in sigmas.items():           
         if size > 1:
-            adjusted_sigmas[size] = sigma * (5 ** size)
+            adjusted_sigmas[size] = sigma #* (5 ** size)
         else:
             adjusted_sigmas[size] = 1.0
     return adjusted_sigmas
@@ -312,7 +304,7 @@ sigmas = adjust_sigmas(sigmas_ext)
 
 # --- Prepare Rigid-Body and Shape Data ---
 full_shell = load_rb_orientation_vec()[0]
-adj_ma = are_blocks_connected_rb(full_shell, vertex_radius=2.0, tolerance=0.2)
+adj_ma = are_blocks_connected_rb(full_shell, vertex_radius=2.1, tolerance=0.2)
 rbs = generate_connected_subsets_rb(full_shell, adj_ma)
 rbs = [rb.flatten() for rb in rbs]
 shapes_species = [get_icos_shape_and_species(size) for size in range(1, 7)]
@@ -349,11 +341,8 @@ for size in range(2, 6 + 1):
 def get_log_z_all(opt_params):
     def compute_log_z(size):
         energy_fn = energy_fns[size]
-        # pdb.set_trace()
         shape = shapes[size - 1]
-        # print(f"shape: {shape}")
         rb = rbs[size - 1]
-        # print(f"rb: {rb}")
         specie = species[size - 1]
         sigma = sigmas[size]
         zrot_mod_sigma = zrot_mod_sigma_values[size - 2]
@@ -374,7 +363,6 @@ def get_log_z_all(opt_params):
     log_z_struc = jnp.array(log_z_struc)
 
     log_z_all = jnp.concatenate([log_z_1, log_z_struc], axis=0)
-    # print(f"log_z_all: {log_z_all}")
 
     return log_z_all
 
@@ -402,40 +390,44 @@ def loss_fn(log_concs_struc, log_z_list):
         log_zalpha = log_z_list[struc_idx]
         z_denom = n_sa * log_zalpha
         return jnp.sqrt((log_vcs - vcs_denom - log_zs + z_denom) ** 2)
+    
+    struc_losses = vmap(struc_loss_fn)(jnp.arange(2, 6))  # sizes 2–6
+    combined     = jnp.concatenate([jnp.array([mon_loss]), struc_losses])  # (6,)
 
-    struc_loss = vmap(struc_loss_fn)(jnp.arange(1, 7))
-    combined_loss = jnp.concatenate([jnp.array([mon_loss]), struc_loss])
+    # --- apply a big weight to the monomer term only ---
+    weights      = jnp.array([10.0] + [1.0]*4)
+    weighted     = combined * weights
 
-    loss_var = jnp.var(combined_loss)
-    tot_loss = jnp.linalg.norm(combined_loss) + loss_var
-    return tot_loss, combined_loss, loss_var
+    # --- variance penalty on the *unweighted* combined losses ---
+    loss_var     = jnp.var(combined)
 
-# --- Optimality Condition -
+    # --- total objective is norm + weighted variance penalty ---
+    tot_loss     = jnp.linalg.norm(weighted) + 50 * loss_var
+
+    return tot_loss, combined, loss_var
+
 def optimality_fn(log_concs_struc, log_z_list):
-    return grad(
-        lambda log_concs_struc, log_z_list: loss_fn(log_concs_struc, log_z_list)[0]
-    )(log_concs_struc, log_z_list)
+    return grad(lambda x, z: loss_fn(x, z)[0])(log_concs_struc, log_z_list)
 
-# --- Inner Solver with Debug ---
-@implicit_diff.custom_root(optimality_fn)
 def inner_solver(init_guess, log_z_list):
-    gd = GradientDescent(
-        fun=lambda log_concs_struc, log_z_list: loss_fn(log_concs_struc, log_z_list)[0],
-        maxiter=90000,
-        implicit_diff=True,
+    lbfgs = LBFGS(
+        fun=lambda x, z: loss_fn(x, z)[0],
+        maxiter=600,     # you can raise/lower this
+        tol=1e-6,        # stop when ‖∇loss‖<1e-6
+        jit=True,
     )
-    sol = gd.run(init_guess, log_z_list)
-    final_params = sol.params
-    # force them into a reasonable window, e.g. [-50, 0]
-    #final_params  = jnp.clip(final_params, a_min=-50., a_max=0.)
-    # replace any NaN with your initial guess
-    final_params = jnp.nan_to_num(final_params, nan=init_guess)
+    sol = lbfgs.run(init_guess, log_z_list)
+    return sol.params
 
-    final_loss, combined_losses, _ = loss_fn(final_params, log_z_list)
-    max_loss = jnp.max(combined_losses)
-    second_max_loss = jnp.partition(combined_losses, -2)[-2]
+# --- Wrap into your outer objective ---
+def ofer(opt_params):
+    log_z_list    = get_log_z_all(opt_params)
+    guess         = jnp.full(6, jnp.log(init_conc_val/6.0))
+    fin_log_concs = inner_solver(guess, log_z_list)
+    total_log     = logsumexp(fin_log_concs)
+    log_yield     = fin_log_concs[-1] - total_log
+    return log_yield
 
-    return final_params
 
 def safe_exp(x, lower_bound=-709.0, upper_bound=709.0):
 
@@ -461,7 +453,7 @@ def ofer(opt_params):
 def ofer_grad_fn(opt_params, desired_yield_val):
     log_yield = ofer(opt_params)
     target = jnp.log(desired_yield_val)
-    return  (desired_yield_val-jnp.exp(log_yield))**2 #+ 0.1*(log_yield - target)**2 
+    return  (desired_yield_val-jnp.exp(log_yield))**2 + 0.1*(log_yield - target)**2 
 
 
 
@@ -469,7 +461,7 @@ num_params = len(init_params)
 mask = jnp.zeros(num_params)
 
 mask = mask.at[0].set(1.0)
-mask = mask.at[-1].set(1.0)
+#mask = mask.at[-1].set(1.0)
 #mask = mask.at[0].set(1.0)
 
 
@@ -477,9 +469,9 @@ def masked_grads(grads):
     return grads * mask
 
 
-our_grad_fn = jit(value_and_grad(ofer_grad_fn, has_aux=False))
+our_grad_fn   = jit(value_and_grad(lambda p, y: (y - jnp.exp(ofer(p)))**2))
 params = init_params
-outer_optimizer = optax.adam(1e-2)
+outer_optimizer = optax.adam(1e-1)
 opt_state = outer_optimizer.init(params)
 
 n_outer_iters = 300
@@ -494,18 +486,22 @@ param_names += [f"kbT"]
 
 
 desired_yield_val = args.desired_yield
+@jit
+def outer_step(params, opt_state, desired_yield):
+    loss, grads = our_grad_fn(params, desired_yield)
+    grads = masked_grads(grads)
+    updates, opt_state = outer_optimizer.update(grads, opt_state)
+    new_params = optax.apply_updates(params, updates)
+    return new_params, opt_state, loss
 
 os.makedirs("Fixed_kt", exist_ok=True)
 kt_val = args.kt
+params = init_params
+opt_state = outer_optimizer.init(params)
 with open(f"Fixed_kt/{kt_val}.txt", "w") as f:
-
-    for i in tqdm(range(n_outer_iters)):
-        loss, grads = our_grad_fn(params, desired_yield_val)
-        # outer_losses.append(loss)
-        grads = masked_grads(grads)
-        updates, opt_state = outer_optimizer.update(grads, opt_state)
-        params = optax.apply_updates(params, updates)
-        # params = project(params)
+    for i in range(n_outer_iters):
+        params, opt_state, loss = outer_step(params, opt_state, desired_yield_val)
+        print(f"iter {i:3d}   loss={loss:.6f}")
         print("Updated Parameters:")
         for name, value in {
             name: params[idx] for idx, name in enumerate(param_names)
@@ -515,14 +511,13 @@ with open(f"Fixed_kt/{kt_val}.txt", "w") as f:
         fin_yield = ofer(params)
         fin_yield = jnp.exp(fin_yield)
         print(f"Desired Yield: {desired_yield_val}, Yield: {fin_yield}")
-
-    final_params = params
-    fin_yield = ofer(params)
-    final_target_yields = jnp.exp(fin_yield)
+        final_params = params
+        fin_yield = ofer(params)
+        final_target_yields = jnp.exp(fin_yield)
 
     f.write(f"{desired_yield_val},{final_target_yields},{params[0],}{params[-1]}\n")
     # f.write(f"{des_yield}, {final_target_yields}, {params[0]}, {params[-1]}\n")
     f.flush()
 
 
-print("All results saved.")
+print("All results saved.")    
