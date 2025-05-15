@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 import pdb
 import os
+
 os.environ["XLA_FLAGS"] = "--xla_dump_to=/tmp/foo"
 from pathlib import Path
 import unittest
@@ -17,10 +18,11 @@ from jax import (
     grad,
     lax,
     checkpoint,
-    clear_backends,
-device_get,
-block_until_ready)
+    device_get,
+    block_until_ready,
+)
 import sys
+
 sys.stdout.flush()
 import optax
 from jaxopt import implicit_diff, GradientDescent, LBFGS
@@ -33,12 +35,12 @@ from jax_md import rigid_body as orig_rigid_body
 import potentials
 import jax_transformations3d as jts
 import absl.logging
+
 absl.logging.set_verbosity(absl.logging.ERROR)
-from jax.config import config
 
 # --- Set JAX configuration; disable JIT to prevent verbose tracer printing ---
 ##config.update("jax_disable_jit", True)  # Disabling jit to avoid jax tracing output in prints.
-#config.update("jax_log_compiles", False)
+# config.update("jax_log_compiles", False)
 
 import itertools
 import numpy as np
@@ -51,9 +53,13 @@ parser = argparse.ArgumentParser(
     description="Run the rigid-body simulation with adjustable parameters."
 )
 # Using new defaults so that typical free energy differences are more moderate.
-parser.add_argument("--kt", type=float, default=1., help="Initial temperature (kbT)")
-parser.add_argument("--init_morse", type=float, default=1.0, help="Initial Morse epsilon")
-parser.add_argument("--init_conc", type=float, default=0.001, help="Initial concentration")
+parser.add_argument("--kt", type=float, default=5.0, help="Initial temperature (kbT)")
+parser.add_argument(
+    "--init_morse", type=float, default=7.0, help="Initial Morse epsilon"
+)
+parser.add_argument(
+    "--init_conc", type=float, default=0.001, help="Initial concentration"
+)
 parser.add_argument("--number_mon", type=int, default=343, help="Number of monomers")
 parser.add_argument("--desired_yield", type=float, default=1.0, help="Desired yield")
 args = parser.parse_args()
@@ -66,6 +72,7 @@ main_key = random.PRNGKey(SEED)
 # Parameter order: [morse_eps, morse_alpha, rep_A, rep_alpha, kbT]
 init_params = jnp.array([args.init_morse, 5.0, 10000.0, 2.5, args.kt])
 displacement_fn, shift_fn = space.free()
+
 
 # --- Utility: Quaternion to Euler conversion ---
 def quat_to_euler(quaternions):
@@ -83,6 +90,7 @@ def quat_to_euler(quaternions):
     yaw = np.arctan2(siny_cosp, cosy_cosp)
     return np.stack([roll, pitch, yaw], axis=1)
 
+
 # --- Geometry Loading Functions ---
 oct_dir = Path("octahedron")
 file_path_quaternion = oct_dir / "rb_orientation_vec.npy"
@@ -91,6 +99,7 @@ file_path_shape = oct_dir / "vertex_shape_points.npy"
 file_path_species = oct_dir / "vertex_shape_point_species.npy"
 file_paths = [file_path_quaternion, file_path_xyz_coordinate, file_path_shape]
 
+
 def load_rb_orientation_vec():
     rb_orientation_vec = jnp.load(file_path_quaternion).astype(jnp.float64)
     rb_center_vec = jnp.load(file_path_xyz_coordinate).astype(jnp.float64)
@@ -99,11 +108,15 @@ def load_rb_orientation_vec():
     euler_orientations = quat_to_euler(np.array(rb_orientation_vec))
     full_shell = jnp.hstack([rb_center_vec, euler_orientations])
     return full_shell, rb_shape_vec, rb_species_vec
+
 
 def get_icos_shape_and_species(size):
     base_shape = load_rb_orientation_vec()[1]
     base_species = jnp.array([0, 1, 2, 1, 2])
-    return jnp.array([base_shape for _ in range(size)]), jnp.array([base_species for _ in range(size)])
+    return jnp.array([base_shape for _ in range(size)]), jnp.array(
+        [base_species for _ in range(size)]
+    )
+
 
 def load_rb_orientation_vec():
     rb_orientation_vec = jnp.load(file_path_quaternion).astype(jnp.float64)
@@ -114,10 +127,14 @@ def load_rb_orientation_vec():
     full_shell = jnp.hstack([rb_center_vec, euler_orientations])
     return full_shell, rb_shape_vec, rb_species_vec
 
+
 def get_octa_shape_and_species(size):
     _, base_shape, _ = load_rb_orientation_vec()
     base_species = jnp.array([0, 1, 2, 1, 2])
-    return jnp.array([base_shape for _ in range(size)]), jnp.array([base_species for _ in range(size)])
+    return jnp.array([base_shape for _ in range(size)]), jnp.array(
+        [base_species for _ in range(size)]
+    )
+
 
 # --- Connectivity Utilities ---
 def are_blocks_connected_rb(vertex_coords, vertex_radius=2.0, tolerance=0.2):
@@ -127,6 +144,7 @@ def are_blocks_connected_rb(vertex_coords, vertex_radius=2.0, tolerance=0.2):
     adjacency_matrix = (distances <= edge_length).astype(int)
     np.fill_diagonal(adjacency_matrix, 0)
     return adjacency_matrix
+
 
 def is_configuration_connected_rb(indices, adj_matrix):
     indices = list(map(int, indices))
@@ -139,6 +157,7 @@ def is_configuration_connected_rb(indices, adj_matrix):
         to_visit.update(neighbors & set(indices) - visited)
     return visited == set(indices)
 
+
 def generate_connected_subsets_rb(vertex_coords, adj_matrix):
     num_vertices = len(vertex_coords)
     configs = [np.array(vertex_coords)]
@@ -146,12 +165,14 @@ def generate_connected_subsets_rb(vertex_coords, adj_matrix):
     current_adj_matrix = adj_matrix.copy()
     while len(current_indices) > 1:
         for i in range(len(current_indices)):
-            test_indices = current_indices[:i] + current_indices[i + 1:]
+            test_indices = current_indices[:i] + current_indices[i + 1 :]
             if is_configuration_connected_rb(test_indices, current_adj_matrix):
                 current_indices = test_indices
                 current_config = vertex_coords[jnp.array(current_indices)]
                 configs.append(current_config)
-                current_adj_matrix = current_adj_matrix[np.ix_(current_indices, current_indices)]
+                current_adj_matrix = current_adj_matrix[
+                    np.ix_(current_indices, current_indices)
+                ]
                 break
         else:
             break
@@ -168,11 +189,13 @@ def generate_connected_subsets_rb(vertex_coords, adj_matrix):
     all_config = one_mer + two_mer + connected_subsets
     return all_config
 
+
 vertex_species = 0
 n_species = 3
 vertex_radius = 2.1
 small_value = 1e-12
 rep_rmax_table = jnp.full((n_species, n_species), 2 * vertex_radius)
+
 
 # --- Potential Functions ---
 def make_tables(opt_params):
@@ -188,6 +211,7 @@ def make_tables(opt_params):
     soft_sigma = soft_sigma.at[0, 0].set(opt_params[3])
     return morse_eps, morse_alpha, soft_eps, soft_sigma
 
+
 def pairwise_morse(ipos, jpos, i_species, j_species, opt_params):
     morse_eps, morse_alpha, _, _ = make_tables(opt_params)
     eps = morse_eps[i_species, j_species]
@@ -196,12 +220,16 @@ def pairwise_morse(ipos, jpos, i_species, j_species, opt_params):
     r_onset = 10.0
     r_cutoff = 12.0
     dr = space.distance(ipos - jpos)
-    return morse(dr, epsilon=eps, alpha=alpha, r_onset=r_onset, r_cutoff=r_cutoff, sigma=sigma)
+    return morse(
+        dr, epsilon=eps, alpha=alpha, r_onset=r_onset, r_cutoff=r_cutoff, sigma=sigma
+    )
+
 
 morse_func = vmap(
     vmap(pairwise_morse, in_axes=(None, 0, None, 0, None)),
     in_axes=(0, None, 0, None, None),
 )
+
 
 def pairwise_repulsion(ipos, jpos, i_species, j_species, opt_params):
     _, _, soft_eps, soft_sigma = make_tables(opt_params)
@@ -210,28 +238,41 @@ def pairwise_repulsion(ipos, jpos, i_species, j_species, opt_params):
     dr = space.distance(ipos - jpos)
     return soft_sphere(dr, sigma=sigma, epsilon=eps)
 
+
 inner_rep = vmap(pairwise_repulsion, in_axes=(None, 0, None, 0, None))
 rep_func = vmap(inner_rep, in_axes=(0, None, 0, None, None))
 
 # --- Energy Function Generator ---
 
+
 def get_nmer_energy_fn(n):
     pos_slices = [(i * 5, (i + 1) * 5) for i in range(n)]
     species_slices = [(i * 5, (i + 1) * 5) for i in range(n)]
     pairs = jnp.array(list(itertools.combinations(np.arange(n), 2)))
+
     def nmer_energy_fn(q, pos, species, opt_params):
         positions = utils.get_positions(q, pos)
         all_pos = jnp.stack([positions[start:end] for start, end in pos_slices])
         species_flat = jnp.concatenate([jnp.array(s).reshape(-1) for s in species])
-        all_species = jnp.stack([species_flat[start:end] for start, end in species_slices])
+        all_species = jnp.stack(
+            [species_flat[start:end] for start, end in species_slices]
+        )
+
         def pairwise_energy(pair):
             i, j = pair
-            morse_energy = morse_func(all_pos[i], all_pos[j], all_species[i], all_species[j], opt_params).sum()
-            rep_energy = rep_func(all_pos[i], all_pos[j], all_species[i], all_species[j], opt_params).sum()
+            morse_energy = morse_func(
+                all_pos[i], all_pos[j], all_species[i], all_species[j], opt_params
+            ).sum()
+            rep_energy = rep_func(
+                all_pos[i], all_pos[j], all_species[i], all_species[j], opt_params
+            ).sum()
             return morse_energy + rep_energy
+
         total_energy = vmap(pairwise_energy)(pairs).sum()
         return total_energy
+
     return nmer_energy_fn
+
 
 def hess(energy_fn, q, pos, species, opt_params):
     H = hessian(energy_fn)(q, pos, species, opt_params)
@@ -286,14 +327,15 @@ def load_sigmas(file_path):
             shell, sigma_str = line.strip().split(",")
             size_str = shell.split("_")[-1]
             size = int(size_str.replace("size", "").replace(".pos", ""))
-            sigmas[size] = float(sigma_str)   
+            sigmas[size] = float(sigma_str)
     return sigmas
+
 
 def adjust_sigmas(sigmas):
     adjusted_sigmas = {}
-    for size, sigma in sigmas.items():           
+    for size, sigma in sigmas.items():
         if size > 1:
-            adjusted_sigmas[size] = sigma #* (5 ** size)
+            adjusted_sigmas[size] = sigma  # * (5 ** size)
         else:
             adjusted_sigmas[size] = 1.0
     return adjusted_sigmas
@@ -366,6 +408,7 @@ def get_log_z_all(opt_params):
 
     return log_z_all
 
+
 log_z_list = get_log_z_all(init_params)
 
 # --- Outer Optimization Setup ---
@@ -390,43 +433,36 @@ def loss_fn(log_concs_struc, log_z_list):
         log_zalpha = log_z_list[struc_idx]
         z_denom = n_sa * log_zalpha
         return jnp.sqrt((log_vcs - vcs_denom - log_zs + z_denom) ** 2)
-    
+
     struc_losses = vmap(struc_loss_fn)(jnp.arange(2, 6))  # sizes 2–6
-    combined     = jnp.concatenate([jnp.array([mon_loss]), struc_losses])  # (6,)
+    combined = jnp.concatenate([jnp.array([mon_loss]), struc_losses])  # (6,)
 
     # --- apply a big weight to the monomer term only ---
-    weights      = jnp.array([10.0] + [1.0]*4)
-    weighted     = combined * weights
+    weights = jnp.array([10.0] + [1.0] * 4)
+    weighted = combined * weights
 
     # --- variance penalty on the *unweighted* combined losses ---
-    loss_var     = jnp.var(combined)
+    loss_var = jnp.var(combined)
 
     # --- total objective is norm + weighted variance penalty ---
-    tot_loss     = jnp.linalg.norm(weighted) + 50 * loss_var
+    tot_loss = jnp.linalg.norm(weighted) + 50 * loss_var
 
     return tot_loss, combined, loss_var
+
 
 def optimality_fn(log_concs_struc, log_z_list):
     return grad(lambda x, z: loss_fn(x, z)[0])(log_concs_struc, log_z_list)
 
+
 def inner_solver(init_guess, log_z_list):
     lbfgs = LBFGS(
         fun=lambda x, z: loss_fn(x, z)[0],
-        maxiter=600,     # you can raise/lower this
-        tol=1e-6,        # stop when ‖∇loss‖<1e-6
+        maxiter=600,  # you can raise/lower this
+        tol=1e-6,  # stop when ‖∇loss‖<1e-6
         jit=True,
     )
     sol = lbfgs.run(init_guess, log_z_list)
     return sol.params
-
-# --- Wrap into your outer objective ---
-def ofer(opt_params):
-    log_z_list    = get_log_z_all(opt_params)
-    guess         = jnp.full(6, jnp.log(init_conc_val/6.0))
-    fin_log_concs = inner_solver(guess, log_z_list)
-    total_log     = logsumexp(fin_log_concs)
-    log_yield     = fin_log_concs[-1] - total_log
-    return log_yield
 
 
 def safe_exp(x, lower_bound=-709.0, upper_bound=709.0):
@@ -434,6 +470,7 @@ def safe_exp(x, lower_bound=-709.0, upper_bound=709.0):
     clipped_x = jnp.clip(x, a_min=lower_bound, a_max=upper_bound)
 
     return jnp.exp(clipped_x)
+
 
 def safe_log(x, eps=1e-10):
     return jnp.log(jnp.clip(x, a_min=eps, a_max=None))
@@ -443,7 +480,7 @@ def ofer(opt_params):
     log_z_list = get_log_z_all(opt_params)
     tot_conc = init_conc_val
     struc_concs_guess = jnp.full(6, safe_log(init_conc_val / 6))
-    #struc_concs_guess = struc_concs_guess.at[-1].set(jnp.log(0.2))
+    # struc_concs_guess = struc_concs_guess.at[-1].set(jnp.log(0.2))
     fin_log_concs = inner_solver(struc_concs_guess, log_z_list)
     total_log = logsumexp(fin_log_concs)
     log_yield = fin_log_concs[-1] - total_log
@@ -453,23 +490,39 @@ def ofer(opt_params):
 def ofer_grad_fn(opt_params, desired_yield_val):
     log_yield = ofer(opt_params)
     target = jnp.log(desired_yield_val)
-    return  (desired_yield_val-jnp.exp(log_yield))**2 + 0.1*(log_yield - target)**2 
-
+    energy_penalty = sum(
+        [
+            energy_fns[size](
+                rbs[size - 1], shapes[size - 1], species[size - 1], opt_params
+            )
+            for size in range(2, 7)
+        ]
+    )
+    return (
+        (desired_yield_val - jnp.exp(log_yield)) ** 2
+        + 0.1 * (log_yield - target) ** 2
+        + 0.05 * energy_penalty
+    )
 
 
 num_params = len(init_params)
 mask = jnp.zeros(num_params)
 
 mask = mask.at[0].set(1.0)
-#mask = mask.at[-1].set(1.0)
-#mask = mask.at[0].set(1.0)
+# mask = mask.at[-1].set(1.0)
+# mask = mask.at[0].set(1.0)
 
 
 def masked_grads(grads):
     return grads * mask
 
 
-our_grad_fn   = jit(value_and_grad(lambda p, y: (y - jnp.exp(ofer(p)))**2))
+def enforce_param_bounds(params):
+    # Ensure morse_eps >= 0.5
+    return params.at[0].set(jnp.maximum(params[0], 0.5))
+
+
+our_grad_fn = jit(value_and_grad(lambda p, y: (y - jnp.exp(ofer(p))) ** 2))
 params = init_params
 outer_optimizer = optax.adam(1e-1)
 opt_state = outer_optimizer.init(params)
@@ -486,19 +539,23 @@ param_names += [f"kbT"]
 
 
 desired_yield_val = args.desired_yield
+
+
 @jit
 def outer_step(params, opt_state, desired_yield):
     loss, grads = our_grad_fn(params, desired_yield)
     grads = masked_grads(grads)
     updates, opt_state = outer_optimizer.update(grads, opt_state)
     new_params = optax.apply_updates(params, updates)
+    new_params = enforce_param_bounds(new_params)
     return new_params, opt_state, loss
 
-os.makedirs("Fixed_kt", exist_ok=True)
+
+os.makedirs("Fixed_Kt", exist_ok=True)
 kt_val = args.kt
 params = init_params
 opt_state = outer_optimizer.init(params)
-with open(f"Fixed_kt/{kt_val}.txt", "w") as f:
+with open(f"Fixed_Kt/{kt_val}.txt", "w") as f:
     for i in range(n_outer_iters):
         params, opt_state, loss = outer_step(params, opt_state, desired_yield_val)
         print(f"iter {i:3d}   loss={loss:.6f}")
@@ -520,4 +577,4 @@ with open(f"Fixed_kt/{kt_val}.txt", "w") as f:
     f.flush()
 
 
-print("All results saved.")    
+print("All results saved.")
