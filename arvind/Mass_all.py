@@ -32,6 +32,7 @@ import matplotlib.pyplot as plt
 from jax.config import config
 import gc
 import os
+from jax.nn import relu, sigmoid, softplus
 import networkx as nx
 from itertools import product
 
@@ -46,7 +47,7 @@ parser.add_argument(
 parser.add_argument(
     "--eps_init",
     type=float,
-    default=6.2,
+    default=4.0,
     help="init strong epsilon values (attraction strengths).",
 )
 parser.add_argument(
@@ -73,7 +74,7 @@ parser.add_argument(
 parser.add_argument(
     "--outer_iters",
     type=int,
-    default=400,
+    default=230,
     help="total number of optimization simulations.",
 )
 args = parser.parse_args()
@@ -137,9 +138,9 @@ def load_species_combinations(filename):
     return data
 
 
-data = load_species_combinations("all_arvind_3_sigma3p.pkl")
+data = load_species_combinations("all_arvind_3_sigma3.pkl")
 
-data_tetr = load_species_combinations("all_extracted_4_sigma3p.pkl")
+data_tetr = load_species_combinations("all_extracted_4_sigma3.pkl")
 
 num_monomers = max(
     int(k.split("_")[0]) for k in data.keys() if k.endswith("_pc_species")
@@ -722,16 +723,16 @@ def ofer(opt_params):
 """
 
 
-#from jax.nn import softplus
-def softplus(x):
-    return jnp.where(x > 20, x, jnp.log(1 + jnp.exp(x))) 
-
-
-def safe_exp(x, lower_bound=-709.0, upper_bound=709.0):
+def safe_exp(x, lower_bound=-701.0, upper_bound=701.0):
 
     clipped_x = jnp.clip(x, a_min=lower_bound, a_max=upper_bound)
 
     return jnp.exp(clipped_x)
+
+
+# from jax.nn import softplus
+# def softplus(x):
+#     return jnp.where(x > 20, x, jnp.log(1 + (safe_exp((10000 + x) / 10))))
 
 
 def ofer(opt_params):
@@ -789,12 +790,90 @@ def ofer_grad_fn(opt_params, desired_yield_val):
     # loss = 10000 * target_yield ** 2 + mass_act_loss
     # loss = (desired_yield_val - safe_exp(target_yield)) #+  2 * softplus(mass_act_loss)
     # loss = (-target_yield) ** (1 / 5) + 0.5 * softplus(mass_act_loss)
-    #loss = 10000 * (abs(0.99 - safe_exp(target_yield))) ** 2 + softplus(mass_act_loss)
-    loss =  10000 * (abs(0.99 - safe_exp(target_yield))) + softplus(mass_act_loss-10000)# 5 * softplus(mass_act_loss)
+    # loss = 10000 * (abs(0.99 - safe_exp(target_yield))) ** 2 + softplus(mass_act_loss)
+    loss = 1000 * (abs(0.99 - safe_exp(target_yield))) + 5 * softplus(mass_act_loss)
+
+    # 5 * softplus(mass_act_loss)
     # loss = 1000 * (abs(0.99 - safe_exp(target_yield))) ** 2 + softplus(
     # mass_act_loss
     # )
     return loss, mass_act_loss
+
+
+# def ofer_grad_fn(opt_params, desired_yield_val):
+#     target_yield_log, mon_concs, fin_conc = ofer(opt_params)
+#     target_yield = safe_exp(target_yield_log)
+
+#     # --- Mass Action Loss Calculation (same as before) ---
+#     def log_massact_loss_fn(opt_params, struc_idx):
+#         def mon_sum(mon_idx):
+#             # Using safe_log here is CRITICAL to prevent NaNs if a monomer concentration is zero
+#             conc_mon_cont = tetramer_counts_array[mon_idx, struc_idx] * safe_log(
+#                 mon_concs[mon_idx]
+#             )
+#             return conc_mon_cont
+
+#         e_plus_1 = e_plus_1_fn(
+#             rb_plus_1, shape_plus_1, species_tetr[struc_idx], opt_params
+#         )
+#         presum_mons = vmap(mon_sum)(jnp.arange(n))
+#         mass_act_loss_val = (
+#             -1 / opt_params[custom_pairs_n] * e_plus_1
+#             + jnp.sum(presum_mons)
+#             + jnp.log(n + 1)
+#         )
+#         return mass_act_loss_val
+
+#     mass_act_loss_logs = vmap(log_massact_loss_fn, in_axes=(None, 0))
+#     mass_act_loss = jnp.sum(
+#         mass_act_loss_logs(opt_params, jnp.arange(species_tetr.shape[0]))
+#     )
+
+#     # --- New Hierarchical Loss Function ---
+
+#     # 1. Define the components
+#     # We want to maximize yield, so our loss is the distance from the target
+#     yield_loss = (0.99 - target_yield) ** 2
+
+#     # For mass action, we want to push it to be negative.
+#     # We penalize positive values and incentivize negative ones down to a certain point.
+#     # Let's define a target for mass_act_loss
+#     mass_act_target = -10000.0
+#     # This loss term is positive if mass_act_loss > target, and zero otherwise.
+#     # It will always try to push mass_act_loss down towards the target.
+#     mass_act_loss_component = relu(mass_act_loss - mass_act_target)
+
+#     # 2. Define the weights based on current yield
+#     yield_threshold = 0.85
+
+#     # Use a smooth transition function (sigmoid) instead of a hard if/else (which is bad for gradients)
+#     # The steepness 'k' controls how sharp the transition is.
+#     k = 20.0
+#     mass_act_weight_factor = sigmoid(k * (target_yield - yield_threshold))
+
+#     # Let's set the base weights
+#     w_yield = 10000.0
+#     w_mass_act = 500.0  # A significant weight that will be "unlocked" by the sigmoid
+
+#     # 3. Combine them
+#     # The yield loss is always active.
+#     # The mass action loss weight is scaled by how much we've exceeded the yield threshold.
+#     # When yield is low, mass_act_weight_factor is ~0.
+#     # When yield is high, mass_act_weight_factor is ~1.
+#     loss = (
+#         w_yield * yield_loss
+#         + (w_mass_act * mass_act_weight_factor) * mass_act_loss_component
+#     )
+
+#     # You can also use lax.cond for a hard switch if the smooth transition doesn't work
+#     # loss = lax.cond(
+#     #     target_yield < yield_threshold,
+#     #     lambda: w_yield * yield_loss,  # If yield is low, only focus on yield
+#     #     lambda: w_yield * yield_loss + w_mass_act * mass_act_loss_component # If yield is high, focus on both
+#     # )
+
+#     # Return mass_act_loss for monitoring, not for the gradient calculation itself
+#     return loss, mass_act_loss
 
 
 def abs_array(par):
@@ -842,7 +921,7 @@ def project_eps(params):
 
 our_grad_fn = jit(value_and_grad(ofer_grad_fn, has_aux=True))
 params = init_params
-outer_optimizer = optax.adam(1e-2)
+outer_optimizer = optax.adam(5e-2)
 opt_state = outer_optimizer.init(params)
 
 n_outer_iters = args.outer_iters
@@ -865,7 +944,7 @@ param_names += [f"C conc:"]
 final_results = []
 
 desired_yield = args.desired_yield
-directory_name = "Paper_results/test_Sigma_3_64"
+directory_name = "Paper_results/working_equal"
 # directory_name = "No_Tetramer"
 # file_name = f"yield{desired_yield }.txt"
 file_name = f"kt{kT}_epsS_8_epsW_5.txt"
