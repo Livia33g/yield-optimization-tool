@@ -41,13 +41,13 @@ parser = argparse.ArgumentParser(description="Simulation with adjustable paramet
 parser.add_argument(
     "--eps_weak",
     type=float,
-    default=4.0,
+    default=2,
     help="weak epsilon values (attraction strengths).",
 )
 parser.add_argument(
     "--eps_init",
     type=float,
-    default=4.0,
+    default=6.2,
     help="init strong epsilon values (attraction strengths).",
 )
 parser.add_argument(
@@ -74,7 +74,7 @@ parser.add_argument(
 parser.add_argument(
     "--outer_iters",
     type=int,
-    default=230,
+    default=450,
     help="total number of optimization simulations.",
 )
 args = parser.parse_args()
@@ -138,9 +138,9 @@ def load_species_combinations(filename):
     return data
 
 
-data = load_species_combinations("all_arvind_3_sigma3.pkl")
+data = load_species_combinations("all_arvind_3.pkl")
 
-data_tetr = load_species_combinations("all_extracted_4_sigma3.pkl")
+data_tetr = load_species_combinations("all_extracted_4.pkl")
 
 num_monomers = max(
     int(k.split("_")[0]) for k in data.keys() if k.endswith("_pc_species")
@@ -791,8 +791,8 @@ def ofer_grad_fn(opt_params, desired_yield_val):
     # loss = (desired_yield_val - safe_exp(target_yield)) #+  2 * softplus(mass_act_loss)
     # loss = (-target_yield) ** (1 / 5) + 0.5 * softplus(mass_act_loss)
     # loss = 10000 * (abs(0.99 - safe_exp(target_yield))) ** 2 + softplus(mass_act_loss)
-    loss = 1000 * (abs(0.99 - safe_exp(target_yield))) + 5 * softplus(mass_act_loss)
-
+    loss = 1000 * (abs(0.99 - safe_exp(target_yield))) + 5 * softplus(mass_act_loss) #actual winning version 
+    #loss = 900 * (abs(0.99 - safe_exp(target_yield))) + 5 * softplus(mass_act_loss)
     # 5 * softplus(mass_act_loss)
     # loss = 1000 * (abs(0.99 - safe_exp(target_yield))) ** 2 + softplus(
     # mass_act_loss
@@ -921,7 +921,7 @@ def project_eps(params):
 
 our_grad_fn = jit(value_and_grad(ofer_grad_fn, has_aux=True))
 params = init_params
-outer_optimizer = optax.adam(5e-2)
+outer_optimizer = optax.adam(2e-2)
 opt_state = outer_optimizer.init(params)
 
 n_outer_iters = args.outer_iters
@@ -944,7 +944,7 @@ param_names += [f"C conc:"]
 final_results = []
 
 desired_yield = args.desired_yield
-directory_name = "Paper_results/working_equal"
+directory_name = "Paper_results/sig3m"
 # directory_name = "No_Tetramer"
 # file_name = f"yield{desired_yield }.txt"
 file_name = f"kt{kT}_epsS_8_epsW_5.txt"
