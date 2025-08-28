@@ -1,0 +1,23 @@
+# Ignore Python bytecode directory
+__pycache__/
+
+# Ignore specific Python scripts
+stoc.py
+arvind_stoc.py
+stoc_max.py
+
+# Ignore a specific directory
+arvind_combinations/
+
+# Ignore shell scripts
+*.sh
+# Ignore backup files
+*~
+*.err
+*.out
+
+# Ignore temporary files starting with .#
+.#*
+
+
+
