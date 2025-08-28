@@ -20,7 +20,7 @@ from jax_md import space
 import potentials
 import utils
 import shapes as sp
-from jax_transformations3d import jax_transformations3d as jts
+import jax_transformations3d as jts
 from jaxopt import implicit_diff, GradientDescent
 from checkpoint import checkpoint_scan
 import pdb
