@@ -1,6 +1,6 @@
 import jax.numpy as jnp
 from jax import vmap
-from jax_transformations3d import jax_transformations3d as jts
+import jax_transformations3d as jts
 
 euler_scheme = "sxyz"
 
