@@ -147,40 +147,6 @@ morse_alpha_table = morse_alpha_table.at[0, 0].set(small_value)
 
 
 main_key, subkey = random.split(main_key)
-"""
-morse_eps_table = small_value * random.uniform(subkey, shape=(n_species, n_species))
-
-
-def make_tables(opt_params):
-    diag_indices = jnp.arange(1, min(n_species, len(opt_params) + 1))  
-    morse_eps_table = morse_eps_table.at[(diag_indices, diag_indices)].set(opt_params)
-    return morse_eps_table
-
-
-def pairwise_repulsion(ipos, jpos, i_species, j_species):
-  
-    rep_rmax = rep_rmax_table[i_species, j_species]
-    rep_a = rep_A_table[i_species, j_species]
-    rep_alpha = rep_alpha_table[i_species, j_species]
-    dr = space.distance(ipos - jpos)
-
-    return potentials.repulsive(dr, rmin=0, rmax=rep_rmax, A=rep_a, alpha=rep_alpha)
-               
-                     
-def pairwise_morse(ipos, jpos, i_species, j_species, opt_params):
-    morse_eps_table = make_tables(opt_params)                 
-    morse_d0 = morse_eps_table[i_species, j_species]
-    morse_alpha = morse_alpha_table[i_species, j_species]
-    morse_alpha = jnp.clip(morse_alpha, 1e-6, None)
-    morse_r0 = 0.0                                   
-    morse_rcut = 8. / morse_alpha + morse_r0
-    dr = space.distance(ipos - jpos)
-                     
-    return potentials.morse_x(dr, rmin=morse_r0, rmax=morse_rcut, D0=morse_d0, 
-                   alpha=morse_alpha, r0=morse_r0, ron=morse_rcut/2.)   
-
-
-"""
 
 @jit
 def get_energy_fns(q, pos, species, opt_params):
@@ -242,27 +208,6 @@ def get_energy_fns(q, pos, species, opt_params):
 
     return tot_energy 
 
-
-"""
-def get_energy(q, pos, species, opt_params):
-    
-    positions = get_positions(q, pos)
-
-    pos1 = positions[0]  
-    pos2 = positions[1]  
-
-    species1 = species[:6]  
-    species2 = species[6:]  
-
-    morse_func = vmap(vmap(pairwise_morse, in_axes=(None, 0, None, 0, None)), in_axes=(0, None, 0, None, None))
-    tot_energy = jnp.sum(morse_func(pos1, pos2, species1, species2, opt_params))
-    
-    inner_rep = vmap(pairwise_repulsion, in_axes=(None, 0, None, 0))
-    rep_func = vmap(inner_rep, in_axes=(0, None, 0, None))
-    tot_energy += jnp.sum(rep_func(pos1, pos2, species1, species2))
-    
-    return tot_energy
-"""
 def add_variables(ma, mb):
     """
     given two vectors of length (6,) corresponding to x,y,z,alpha,beta,gamma,
@@ -292,93 +237,6 @@ def add_variables_all(mas, mbs):
     return jnp.reshape(vmap(add_variables, in_axes=(0, 0))(
         mas_temp, mbs_temp), mas.shape)
 
-
-"""
-def pairwise_morse(ipos, jpos, i_species, j_species, opt_params):
-    morse_eps_table = make_tables(opt_params)
-    morse_d0 = morse_eps_table[i_species, j_species]
-    morse_alpha = morse_alpha_table[i_species, j_species]
-    morse_r0 = 0.0
-    morse_rcut = 8.0 / morse_alpha + morse_r0
-    dr = space.distance(ipos - jpos)
-    return potentials.morse_x(
-        dr,
-        rmin=morse_r0,
-        rmax=morse_rcut,
-        D0=morse_d0,
-        alpha=morse_alpha,
-        r0=morse_r0,
-        ron=morse_rcut / 2.0,
-    )
-
-# Use `vmap` over the required axis
-morse_func = vmap(pairwise_morse, in_axes=(0, None, 0, None, None))
-
-
-
-
-
-
-
-def pairwise_repulsion(ipos, jpos, i_species, j_species):
-    rep_rmax = rep_rmax_table[i_species, j_species]
-    rep_a = rep_A_table[i_species, j_species]
-    rep_alpha = rep_alpha_table[i_species, j_species]
-    dr = space.distance(ipos - jpos)
-    return potentials.repulsive(dr, rmin=0, rmax=rep_rmax, A=rep_a, alpha=rep_alpha)
-
-
-inner_rep = vmap(pairwise_repulsion, in_axes=(None, 0, None, 0))
-rep_func = vmap(inner_rep, in_axes=(0, None, 0, None))
-
-
-def get_nmer_energy_fn(n):
-    pairs = jnp.array(onp.array(list(itertools.combinations(onp.arange(n), 2))))
-
-    def nmer_energy_fn(q, pos, species, opt_params):
-        positions = utils.get_positions(q, pos)
-        pos_slices = [(i * 6, (i + 1) * 6) for i in range(n)]
-        species_slices = [(i * 6, (i + 1) * 6) for i in range(n)]
-
-        all_pos = jnp.stack([positions[start:end] for start, end in pos_slices])
-        all_species = jnp.stack(
-            [jnp.repeat(species[start:end], 1) for start, end in species_slices]
-        )
-
-        def pairwise_energy(pair):
-            i, j = pair
-            morse_energy = morse_func(
-                all_pos[i], all_pos[j], all_species[i], all_species[j], opt_params
-            ).sum()
-            rep_energy = rep_func(
-                all_pos[i], all_pos[j], all_species[i], all_species[j]
-            ).sum()
-            return morse_energy + rep_energy
-
-        all_pairwise_energies = vmap(pairwise_energy)(pairs)
-        return all_pairwise_energies.sum()
-
-    return nmer_energy_fn
-
-def get_energy(q, pos, species, opt_params):
-    
-    positions = get_positions(q, pos)
-
-    pos1 = positions[0]  
-    pos2 = positions[1]  
-
-    species1 = species[:6]  
-    species2 = species[6:12]  
-
-    morse_func = vmap(vmap(pairwise_morse, in_axes=(None, 0, None, 0)), in_axes=(0, None, 0, None))
-    tot_energy = jnp.sum(morse_func(pos1, pos2, species1, species2, opt_params))
-    
-    inner_rep = vmap(pairwise_repulsion, in_axes=(None, 0, None, 0))
-    rep_func = vmap(inner_rep, in_axes=(0, None, 0, None))
-    tot_energy += jnp.sum(rep_func(pos1, pos2, species1, species2))
-
-    return tot_energy
-"""
 
 def hess(energy_fn, q, pos, species, opt_params):
     H = hessian(energy_fn)(q, pos, species, opt_params)
