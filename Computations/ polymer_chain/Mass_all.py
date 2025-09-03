@@ -588,11 +588,9 @@ tetramer_counts = {
 }
 
 tetramer_counts_array = jnp.array(list(tetramer_counts.values()))
-# tetramer_counts_array = jnp.array([tetramer_counts[key] for key in sorted(tetramer_counts.keys())])
 
 
 def loss_fn(log_concs_struc, log_z_list, opt_params):
-    # m_conc = init_concs  # opt_params[-n:] init_concs
     m_conc = opt_params[-n:]
     log_mon_conc = safe_log(m_conc)
 
@@ -655,7 +653,6 @@ def loss_fn(log_concs_struc, log_z_list, opt_params):
     mass_act_loss_log = jnp.array([ mass_act_loss])
     """
     loss_var = jnp.var(jnp.concatenate([mon_loss, struc_loss]))
-    # combined_losses = jnp.concatenate([mon_loss, struc_loss, mass_act_loss_log])
     combined_losses = jnp.concatenate([mon_loss, struc_loss])
     combined_loss = jnp.linalg.norm(combined_losses)
 
@@ -691,48 +688,12 @@ def inner_solver(init_guess, log_z_list, opt_params):
     return final_params
 
 
-#########################
-
-"""
-def return_both_yields(func):
-    @wraps(func)
-    def wrapper(*args, return_both=False, **kwargs):
-        target_yield, mon_yield_tot, tots = func(*args, **kwargs)
-        if return_both:
-            return target_yield, mon_yield_tot, tots
-        return target_yield
-
-    return wrapper
-
-
-@return_both_yields
-def ofer(opt_params):
-    log_z_list = get_log_z_all(opt_params)
-    tot_conc = opt_params[-n:].sum()
-    struc_concs_guess = jnp.full(
-        tot_num_structures, safe_log(tot_conc / tot_num_structures)
-    )
-    fin_log_concs = inner_solver(struc_concs_guess, log_z_list, opt_params)
-    fin_concs = jnp.exp(fin_log_concs)
-    yields = fin_concs / jnp.sum(fin_concs)
-    target_yield = safe_log(yields[target_idx])
-    mon_yield_tot = jnp.sum(yields[:n])
-    # return target_yield, jnp.sum(fin_concs)  # mon_yield_tot
-    # return target_yield, mon_yield_tot
-    return target_yield, fin_concs[:n], fin_concs.sum()
-"""
-
 
 def safe_exp(x, lower_bound=-701.0, upper_bound=701.0):
 
     clipped_x = jnp.clip(x, a_min=lower_bound, a_max=upper_bound)
 
     return jnp.exp(clipped_x)
-
-
-# from jax.nn import softplus
-# def softplus(x):
-#     return jnp.where(x > 20, x, jnp.log(1 + (safe_exp((10000 + x) / 10))))
 
 
 def ofer(opt_params):
@@ -779,101 +740,14 @@ def ofer_grad_fn(opt_params, desired_yield_val):
         return mass_act_loss
 
     mass_act_loss_logs = vmap(log_massact_loss_fn, in_axes=(None, 0))
-    # mass_act_loss = jnp.sqrt((init_conc-fin_conc+jnp.sum(mass_act_loss_fun(opt_params, species_tetr)))**2)
 
     mass_act_loss = jnp.sum(
         mass_act_loss_logs(opt_params, jnp.arange(species_tetr.shape[0]))
     )
-    # mass_act_loss = 1
+    # mass_act_loss = 1 #if not using mass action constraint
 
-    # loss = jnp.linalg.norm(desired_yield_val - jnp.exp(target_yield))
-    # loss = 10000 * target_yield ** 2 + mass_act_loss
-    # loss = (desired_yield_val - safe_exp(target_yield)) #+  2 * softplus(mass_act_loss)
-    # loss = (-target_yield) ** (1 / 5) + 0.5 * softplus(mass_act_loss)
-    # loss = 10000 * (abs(0.99 - safe_exp(target_yield))) ** 2 + softplus(mass_act_loss)
     loss = 1000 * (abs(0.99 - safe_exp(target_yield))) + 5 * softplus(mass_act_loss) #actual winning version 
-    #loss = 900 * (abs(0.99 - safe_exp(target_yield))) + 5 * softplus(mass_act_loss)
-    # 5 * softplus(mass_act_loss)
-    # loss = 1000 * (abs(0.99 - safe_exp(target_yield))) ** 2 + softplus(
-    # mass_act_loss
-    # )
     return loss, mass_act_loss
-
-
-# def ofer_grad_fn(opt_params, desired_yield_val):
-#     target_yield_log, mon_concs, fin_conc = ofer(opt_params)
-#     target_yield = safe_exp(target_yield_log)
-
-#     # --- Mass Action Loss Calculation (same as before) ---
-#     def log_massact_loss_fn(opt_params, struc_idx):
-#         def mon_sum(mon_idx):
-#             # Using safe_log here is CRITICAL to prevent NaNs if a monomer concentration is zero
-#             conc_mon_cont = tetramer_counts_array[mon_idx, struc_idx] * safe_log(
-#                 mon_concs[mon_idx]
-#             )
-#             return conc_mon_cont
-
-#         e_plus_1 = e_plus_1_fn(
-#             rb_plus_1, shape_plus_1, species_tetr[struc_idx], opt_params
-#         )
-#         presum_mons = vmap(mon_sum)(jnp.arange(n))
-#         mass_act_loss_val = (
-#             -1 / opt_params[custom_pairs_n] * e_plus_1
-#             + jnp.sum(presum_mons)
-#             + jnp.log(n + 1)
-#         )
-#         return mass_act_loss_val
-
-#     mass_act_loss_logs = vmap(log_massact_loss_fn, in_axes=(None, 0))
-#     mass_act_loss = jnp.sum(
-#         mass_act_loss_logs(opt_params, jnp.arange(species_tetr.shape[0]))
-#     )
-
-#     # --- New Hierarchical Loss Function ---
-
-#     # 1. Define the components
-#     # We want to maximize yield, so our loss is the distance from the target
-#     yield_loss = (0.99 - target_yield) ** 2
-
-#     # For mass action, we want to push it to be negative.
-#     # We penalize positive values and incentivize negative ones down to a certain point.
-#     # Let's define a target for mass_act_loss
-#     mass_act_target = -10000.0
-#     # This loss term is positive if mass_act_loss > target, and zero otherwise.
-#     # It will always try to push mass_act_loss down towards the target.
-#     mass_act_loss_component = relu(mass_act_loss - mass_act_target)
-
-#     # 2. Define the weights based on current yield
-#     yield_threshold = 0.85
-
-#     # Use a smooth transition function (sigmoid) instead of a hard if/else (which is bad for gradients)
-#     # The steepness 'k' controls how sharp the transition is.
-#     k = 20.0
-#     mass_act_weight_factor = sigmoid(k * (target_yield - yield_threshold))
-
-#     # Let's set the base weights
-#     w_yield = 10000.0
-#     w_mass_act = 500.0  # A significant weight that will be "unlocked" by the sigmoid
-
-#     # 3. Combine them
-#     # The yield loss is always active.
-#     # The mass action loss weight is scaled by how much we've exceeded the yield threshold.
-#     # When yield is low, mass_act_weight_factor is ~0.
-#     # When yield is high, mass_act_weight_factor is ~1.
-#     loss = (
-#         w_yield * yield_loss
-#         + (w_mass_act * mass_act_weight_factor) * mass_act_loss_component
-#     )
-
-#     # You can also use lax.cond for a hard switch if the smooth transition doesn't work
-#     # loss = lax.cond(
-#     #     target_yield < yield_threshold,
-#     #     lambda: w_yield * yield_loss,  # If yield is low, only focus on yield
-#     #     lambda: w_yield * yield_loss + w_mass_act * mass_act_loss_component # If yield is high, focus on both
-#     # )
-
-#     # Return mass_act_loss for monitoring, not for the gradient calculation itself
-#     return loss, mass_act_loss
 
 
 def abs_array(par):
@@ -899,9 +773,6 @@ num_params = len(init_params)
 
 mask = jnp.full(num_params, 1.0)
 mask = mask.at[custom_pairs_n].set(0.0)
-# mask = mask.at[1].set(1.0)
-# mask = mask.at[0].set(1.0)
-
 
 def masked_grads(grads):
     return grads * mask
@@ -944,10 +815,9 @@ param_names += [f"C conc:"]
 final_results = []
 
 desired_yield = args.desired_yield
-directory_name = "Paper_results/sig3m"
-# directory_name = "No_Tetramer"
-# file_name = f"yield{desired_yield }.txt"
-file_name = f"kt{kT}_epsS_8_epsW_5.txt"
+directory_name = "Paper_results"
+
+file_name = f"kt{kT}_eps.txt"
 output_file_path = os.path.join(directory_name, file_name)
 
 # Ensure the directory exists
